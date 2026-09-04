@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip"
+      - "Nova-Indir-main_Checkpoint-052_Source.zip"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -23,8 +23,8 @@ jobs:
     timeout-minutes: 60
 
     env:
-      SOURCE_ZIP: Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip
-      EXPECTED_SHA256: ad4af671b416301b7cf78105bb786e513875e0d5195fa4308959bd5eed2afbe0
+      SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
+      EXPECTED_SHA256: 86c25840f9e82a1efcb32178eb77b2971677b6977fc9c78971a27dc517cf4cbc
       GRADLE_OPTS: -Dfile.encoding=UTF-8
 
     steps:
@@ -35,44 +35,88 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "::error::Hedef ZIP dosyası ($SOURCE_ZIP) ana dizinde bulunamadı!"
+            echo "::error::Source ZIP bulunamadi: $SOURCE_ZIP"
             exit 1
           fi
+
           ACTUAL_SHA256="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+
+          echo "Beklenen SHA-256:"
+          echo "$EXPECTED_SHA256"
+
+          echo "Gercek SHA-256:"
+          echo "$ACTUAL_SHA256"
+
           if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
             echo "::error::Source ZIP SHA-256 dogrulamasi basarisiz."
             exit 1
           fi
+
           echo "SHA-256 dogrulama BASARILI."
 
       - name: Extract source
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf source
           mkdir -p source
+
           unzip -q "$SOURCE_ZIP" -d source
+
           echo "Kaynak ZIP acildi."
+          find source -maxdepth 3 -type f | head -100
 
       - name: Locate Android project
         id: project
         shell: bash
         run: |
           set -euo pipefail
-          PROJECT_DIR="$(find "$GITHUB_WORKSPACE/source" -name gradlew -type f -print -quit | xargs -r dirname)"
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Android projesi bulunamadi."
+
+          PROJECT_GRADLE="$(find "$GITHUB_WORKSPACE/source" \
+            -type f \
+            -name "gradlew" \
+            -print -quit)"
+
+          if [ -z "$PROJECT_GRADLE" ]; then
+            echo "::error::Android projesi bulunamadi. gradlew bulunamadi."
             exit 1
           fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_GRADLE")"
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "Android proje dizini:"
+          echo "$PROJECT_DIR"
 
       - name: source.ready
         shell: bash
         run: |
           set -euo pipefail
+
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "::error::gradlew bulunamadi."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "::error::settings.gradle veya settings.gradle.kts bulunamadi."
+            exit 1
+          fi
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "::error::app modulu bulunamadi."
+            exit 1
+          fi
+
           chmod +x "$PROJECT_DIR/gradlew"
+
           echo "source.ready"
 
       - name: Set up Java 17
@@ -84,29 +128,320 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android API 36
+      - name: Install Android SDK components
         shell: bash
         run: |
           set -euo pipefail
+
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36"
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build All Test APKs
+      - name: Inspect Gradle configuration
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          # İmza ve Play Store kısıtlamalarına takılmayan Test APK oluşturma görevleri tetikleniyor
-          ./gradlew :app:assembleNovaIndependentDebug :app:assembleNovaPlayDebug --no-daemon --max-workers=2 --stacktrace --console=plain
 
-      - name: Upload Build Artifacts
+          ./gradlew --version
+
+      - name: Check available Gradle tasks
+        id: tasks
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew tasks --all \
+            --no-daemon \
+            --console=plain \
+            | tee "$GITHUB_WORKSPACE/gradle-tasks.txt"
+
+      - name: Verify required build variants
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TASKS="$GITHUB_WORKSPACE/gradle-tasks.txt"
+
+          REQUIRED_TASKS=(
+            "assembleIndependentLiteDebug"
+            "assembleIndependentProDebug"
+            "assemblePlayLiteDebug"
+            "assemblePlayProDebug"
+            "bundlePlayLiteRelease"
+            "bundlePlayProRelease"
+          )
+
+          for TASK in "${REQUIRED_TASKS[@]}"; do
+            if ! grep -q "$TASK" "$TASKS"; then
+              echo "::error::Gerekli Gradle task bulunamadi: $TASK"
+              exit 1
+            fi
+          done
+
+          echo "Tum gerekli Lite/Pro/Play/Independent task'lari mevcut."
+
+      - name: Validate Room schema files
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SCHEMA_DIR="app/schemas"
+
+          if [ ! -d "$SCHEMA_DIR" ]; then
+            echo "Room schema dizini bulunamadi:"
+            echo "$SCHEMA_DIR"
+            echo "Schema validation atlaniyor."
+            exit 0
+          fi
+
+          echo "Room schema dosyalari:"
+          find "$SCHEMA_DIR" -type f -name "*.json" -print
+
+          python3 - "$SCHEMA_DIR" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          errors = []
+
+          for path in sorted(root.rglob("*.json")):
+              try:
+                  with path.open("r", encoding="utf-8") as f:
+                      json.load(f)
+
+                  print(f"OK: {path}")
+
+              except Exception as exc:
+                  print(f"BOZUK: {path}")
+                  print(f"HATA: {exc}")
+                  errors.append(path)
+
+          if errors:
+              print()
+              print("BOZUK ROOM SCHEMA DOSYALARI:")
+              for path in errors:
+                  print(path)
+
+              sys.exit(1)
+
+          print()
+          print("Tum Room schema JSON dosyalari gecerli.")
+          PY
+
+      - name: Clean
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew clean \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Build Independent Lite APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assembleIndependentLiteDebug \
+            -PNOVA_APK_SPLITS=true \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Build Independent Pro APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assembleIndependentProDebug \
+            -PNOVA_APK_SPLITS=true \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Build Google Play Lite APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assemblePlayLiteDebug \
+            -PNOVA_APK_SPLITS=true \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Build Google Play Pro APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assemblePlayProDebug \
+            -PNOVA_APK_SPLITS=true \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Verify APK outputs
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "APK dosyalari:"
+          find app/build/outputs/apk -type f -name "*.apk" -print
+
+          APK_COUNT="$(find app/build/outputs/apk -type f -name "*.apk" | wc -l)"
+
+          if [ "$APK_COUNT" -lt 4 ]; then
+            echo "::error::Beklenen APK varyantlari olusmadi. Bulunan APK sayisi: $APK_COUNT"
+            exit 1
+          fi
+
+          echo "APK ciktilari mevcut."
+
+      - name: Upload Independent Lite APK
         uses: actions/upload-artifact@v4
         with:
-          name: Nova-Indir-Test-APKs
+          name: Nova-Indir-Independent-Lite
           path: |
-            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/IndependentLite/**/*.apk
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload Independent Pro APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-Independent-Pro
+          path: |
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/IndependentPro/**/*.apk
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Google Play Lite APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Lite-APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/PlayLite/**/*.apk
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Google Play Pro APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Pro-APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/PlayPro/**/*.apk
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build Google Play Lite AAB
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:bundlePlayLiteRelease \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Build Google Play Pro AAB
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:bundlePlayProRelease \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Verify Google Play AAB outputs
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "AAB dosyalari:"
+          find app/build/outputs/bundle -type f -name "*.aab" -print
+
+          AAB_COUNT="$(find app/build/outputs/bundle -type f -name "*.aab" | wc -l)"
+
+          if [ "$AAB_COUNT" -lt 2 ]; then
+            echo "::error::Beklenen Google Play AAB ciktilari olusmadi. Bulunan AAB sayisi: $AAB_COUNT"
+            exit 1
+          fi
+
+          echo "Google Play AAB ciktilari mevcut."
+
+      - name: Upload Google Play Lite AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Lite-AAB
+          path: |
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/bundle/**/*lite*.aab
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Google Play Pro AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Pro-AAB
+          path: |
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/bundle/**/*pro*.aab
+            ${{ steps.project.outputs.project_dir }}/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "NOVA INDIR BUILD SUMMARY"
+          echo "=========================================="
+          echo
+          echo "APK:"
+          find app/build/outputs/apk -type f -name "*.apk" -print 2>/dev/null || true
+          echo
+          echo "AAB:"
+          find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
+          echo
+          echo "=========================================="

@@ -1,9 +1,42 @@
+name: Nova Indir Full Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "Nova-Indir-main_Checkpoint-052_Source.zip"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nova-indir-full-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Nova Indir Lite + Pro + Play + Independent
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
+      EXPECTED_SHA256: 86c25840f9e82a1efcb32178eb77b2971677b6977fc9c78971a27dc517cf4cbc
+      GRADLE_OPTS: -Dfile.encoding=UTF-8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: SHA-256 source verification
         shell: bash
         run: |
           set -euo pipefail
 
-          # Dosyanın varlığını dostça kontrol et
+          # Dosyanın varlığını güvenli bir şekilde kontrol et
           if [ ! -f "$SOURCE_ZIP" ]; then
             echo "::error::Hedef ZIP dosyası ($SOURCE_ZIP) ana dizinde bulunamadı!"
             echo "=== MEVCUT DOSYALAR LİSTELENİYOR ==="
@@ -25,3 +58,218 @@
           fi
 
           echo "SHA-256 dogrulama BASARILI."
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf source
+          mkdir -p source
+
+          unzip -q "$SOURCE_ZIP" -d source
+
+          echo "Kaynak ZIP acildi."
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR="$(find "$GITHUB_WORKSPACE/source" \
+            -name gradlew \
+            -type f \
+            -print -quit \
+            | xargs -r dirname)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::Android projesi bulunamadi."
+            exit 1
+          fi
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android proje dizini:"
+          echo "$PROJECT_DIR"
+
+      - name: source.ready
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          test -f "$PROJECT_DIR/gradlew"
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          echo "source.ready"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Check Gradle tasks
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew tasks --all --no-daemon --console=plain \
+            | tee "$GITHUB_WORKSPACE/gradle-tasks.txt"
+
+          grep -q "assembleIndependentLiteDebug" "$GITHUB_WORKSPACE/gradle-tasks.txt"
+          grep -q "assembleIndependentProDebug" "$GITHUB_WORKSPACE/gradle-tasks.txt"
+          grep -q "assemblePlayLiteDebug" "$GITHUB_WORKSPACE/gradle-tasks.txt"
+          grep -q "assemblePlayProDebug" "$GITHUB_WORKSPACE/gradle-tasks.txt"
+          grep -q "bundlePlayLiteRelease" "$GITHUB_WORKSPACE/gradle-tasks.txt"
+          grep -q "bundlePlayProRelease" "$GITHUB_WORKSPACE/gradle-tasks.txt"
+
+          echo "Beklenen Nova build task'lari mevcut."
+
+      - name: Clean
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew clean \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Build all APK variants
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assembleIndependentLiteDebug \
+            :app:assembleIndependentProDebug \
+            :app:assemblePlayLiteDebug \
+            :app:assemblePlayProDebug \
+            -PNOVA_APK_SPLITS=true \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Verify APK outputs
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "Nova Indir 0.10.0 Bağımsız Test/Nova İndir 0.10.0 Lite Universal.apk"
+          test -f "Nova Indir 0.10.0 Bağımsız Test/Nova İndir 0.10.0 Pro Universal.apk"
+
+          test -f "Nova Indir 0.10.0 Google Play Test/Nova İndir 0.10.0 Lite Universal.apk"
+          test -f "Nova Indir 0.10.0 Google Play Test/Nova İndir 0.10.0 Pro Universal.apk"
+
+          echo "APK ciktilari BASARILI."
+
+      - name: Upload Independent Lite APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-Independent-Lite-APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova Indir 0.10.0 Bağımsız Test/Nova İndir 0.10.0 Lite Universal.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Independent Pro APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-Independent-Pro-APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova Indir 0.10.0 Bağımsız Test/Nova İndir 0.10.0 Pro Universal.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Google Play Lite APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Lite-APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova Indir 0.10.0 Google Play Test/Nova İndir 0.10.0 Lite Universal.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Google Play Pro APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Pro-APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova Indir 0.10.0 Google Play Test/Nova İndir 0.10.0 Pro Universal.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build Google Play Lite + Pro AAB
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:bundlePlayLiteRelease \
+            :app:bundlePlayProRelease \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      - name: Verify Google Play AAB outputs
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "Nova İndir 0.10.0 Google Play/Nova İndir 0.10.0 Lite.aab"
+          test -f "Nova İndir 0.10.0 Google Play/Nova İndir 0.10.0 Pro.aab"
+
+          echo "Google Play AAB ciktilari BASARILI."
+
+      - name: Upload Google Play Lite AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Lite-AAB
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova İndir 0.10.0 Google Play/Nova İndir 0.10.0 Lite.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Google Play Pro AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-GooglePlay-Pro-AAB
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova İndir 0.10.0 Google Play/Nova İndir 0.10.0 Pro.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova-Indir-Build-Logs
+          path: |
+            ${{ github.workspace }}/gradle-tasks.txt
+          if-no-files-found: warn

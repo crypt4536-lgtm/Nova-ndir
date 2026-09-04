@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "Nova-Indir-main_Checkpoint-052_Source.zip"
+      - "Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip"
       - ".github/workflows/build.yml"
 
 permissions:

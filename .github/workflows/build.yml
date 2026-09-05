@@ -1,19 +1,31 @@
-name: Nova İndir Full Build
+name: Nova İndir Dağıtım Derlemesi
 
 on:
   workflow_dispatch:
+    inputs:
+      hedef:
+        description: "Derlenecek dağıtım"
+        required: true
+        default: "tümü"
+        type: choice
+        options:
+          - "tümü"
+          - "bağımsız"
+          - "google-play"
+
   push:
     branches:
       - main
     paths:
       - "Nova-Indir-main_Checkpoint-052_Source.zip"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/nova-build.yml"
+      - ".github/NOVA_BUILD_NOW"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: nova-indir-full-build
+  group: nova-indir-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -24,55 +36,95 @@ jobs:
 
     env:
       SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
+
+      # Bu yüklediğin ZIP'in SHA-256 değeri
       EXPECTED_SHA256: 97aec25ff635f47f0c835f0710589fabb65f43345ba155e1684d3134987abf5e
-      GRADLE_OPTS: -Dfile.encoding=UTF-8
+
+      GRADLE_OPTS: "-Dfile.encoding=UTF-8"
+
+      NOVA_KEY_ALIAS: ${{ secrets.NOVA_KEY_ALIAS }}
+      NOVA_STORE_PASSWORD: ${{ secrets.NOVA_STORE_PASSWORD }}
+      NOVA_KEY_PASSWORD: ${{ secrets.NOVA_KEY_PASSWORD }}
+
+      NOVA_PLAY_PRIVACY_URL: ${{ vars.NOVA_PLAY_PRIVACY_URL }}
+      NOVA_INDEPENDENT_PRIVACY_URL: ${{ vars.NOVA_INDEPENDENT_PRIVACY_URL }}
+
+      NOVA_UPDATE_MANIFEST_URL_FULL: ${{ vars.NOVA_UPDATE_MANIFEST_URL_FULL }}
+      NOVA_UPDATE_MANIFEST_URL_LITE: ${{ vars.NOVA_UPDATE_MANIFEST_URL_LITE }}
+
+      NOVA_UPDATE_PUBLIC_KEY_B64: ${{ secrets.NOVA_UPDATE_PUBLIC_KEY_B64 }}
+
+      NOVA_PLAY_DISPENSER_URL: ${{ vars.NOVA_PLAY_DISPENSER_URL }}
 
     steps:
 
-      - name: Checkout
+      # ============================================================
+      # 1. REPOSITORY
+      # ============================================================
+
+      - name: Kaynağı al
         uses: actions/checkout@v6
 
-      - name: SHA-256 source verification
+      # ============================================================
+      # 2. SHA-256 DOĞRULAMA
+      # ============================================================
+
+      - name: Source ZIP SHA-256 doğrulaması
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$SOURCE_ZIP"
+          echo "Kaynak ZIP:"
+          echo "$SOURCE_ZIP"
+          echo
+
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "::error::Kaynak ZIP bulunamadı: $SOURCE_ZIP"
+            exit 1
+          fi
 
           ACTUAL_SHA256="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
 
           echo "Beklenen SHA-256:"
           echo "$EXPECTED_SHA256"
           echo
+
           echo "Gerçek SHA-256:"
           echo "$ACTUAL_SHA256"
+          echo
 
           if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
             echo "::error::Source ZIP SHA-256 doğrulaması başarısız."
             exit 1
           fi
 
-          echo "SHA-256 doğrulama BAŞARILI."
+          echo "SHA-256 doğrulaması BAŞARILI."
 
-      - name: Extract source
+      # ============================================================
+      # 3. SOURCE READY
+      # ============================================================
+
+      - name: Source ZIP'i aç
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf "$GITHUB_WORKSPACE/source"
+
           mkdir -p "$GITHUB_WORKSPACE/source"
 
-          unzip -q "$SOURCE_ZIP" -d "$GITHUB_WORKSPACE/source"
+          unzip -q "$SOURCE_ZIP" \
+            -d "$GITHUB_WORKSPACE/source"
 
-          echo "Kaynak ZIP açıldı."
+          echo "Kaynak ZIP başarıyla açıldı."
 
-      - name: Locate Android project
+      - name: Android projesini bul
         id: project
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_GRADLE="$(
+          GRADLEW="$(
             find "$GITHUB_WORKSPACE/source" \
               -type f \
               -name "gradlew" \
@@ -80,15 +132,16 @@ jobs:
               | head -1
           )"
 
-          if [ -z "$PROJECT_GRADLE" ]; then
-            echo "::error::Android projesi bulunamadı. gradlew bulunamadı."
+          if [ -z "$GRADLEW" ]; then
+            echo "::error::Kaynak içinde gradlew bulunamadı."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$PROJECT_GRADLE")"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
+          echo
           echo "Android proje dizini:"
           echo "$PROJECT_DIR"
 
@@ -103,7 +156,7 @@ jobs:
 
           if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
              [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
-            echo "::error::settings.gradle veya settings.gradle.kts bulunamadı."
+            echo "::error::settings.gradle(.kts) bulunamadı."
             exit 1
           fi
 
@@ -114,18 +167,29 @@ jobs:
 
           chmod +x "$PROJECT_DIR/gradlew"
 
+          echo
+          echo "=========================================="
           echo "source.ready"
+          echo "=========================================="
 
-      - name: Set up Java 17
+      # ============================================================
+      # 4. JAVA
+      # ============================================================
+
+      - name: Java 17 hazırla
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
+      # ============================================================
+      # 5. ANDROID SDK
+      # ============================================================
+
+      - name: Android SDK hazırla
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK components
+      - name: Android API 36 ve Build Tools hazırla
         shell: bash
         run: |
           set -euo pipefail
@@ -134,20 +198,36 @@ jobs:
 
           sdkmanager \
             "platform-tools" \
-            "platforms;android-35" \
+            "platforms;android-36" \
             "build-tools;35.0.0"
 
-      - name: Set up Gradle
+      # ============================================================
+      # 6. GRADLE
+      # ============================================================
+
+      - name: Gradle önbelleğini hazırla
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Gradle version
+      - name: Gradle Wrapper çalıştırma izni
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
+          chmod +x ./gradlew
+
+      - name: Gradle sürümünü göster
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
           ./gradlew --version
 
-      - name: Check available Gradle tasks
+      # ============================================================
+      # 7. TASK KONTROLÜ
+      # ============================================================
+
+      - name: Nova build tasklarını doğrula
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
@@ -158,33 +238,31 @@ jobs:
             --console=plain \
             | tee "$GITHUB_WORKSPACE/gradle-tasks.txt"
 
-      - name: Verify required build variants
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TASKS="$GITHUB_WORKSPACE/gradle-tasks.txt"
-
           REQUIRED_TASKS=(
-            "assembleIndependentLiteDebug"
-            "assembleIndependentProDebug"
-            "assemblePlayLiteDebug"
-            "assemblePlayProDebug"
-            "bundlePlayLiteRelease"
-            "bundlePlayProRelease"
+            "assembleNovaPlayDebug"
+            "bundleNovaPlayRelease"
+            "assembleNovaIndependentDebug"
+            "assembleNovaIndependentRelease"
+            "buildNovaDistributionRelease"
           )
 
           for TASK in "${REQUIRED_TASKS[@]}"; do
-            if ! grep -q "$TASK" "$TASKS"; then
-              echo "::error::Gerekli Gradle task bulunamadı: $TASK"
+            if ! grep -q "$TASK" "$GITHUB_WORKSPACE/gradle-tasks.txt"; then
+              echo "::error::Gerekli Nova Gradle task bulunamadı: $TASK"
               exit 1
             fi
 
             echo "OK: $TASK"
           done
 
-      - name: Validate Room schema files
+          echo
+          echo "Gerekli Nova build taskları mevcut."
+
+      # ============================================================
+      # 8. ROOM SCHEMA KONTROLÜ
+      # ============================================================
+
+      - name: Room schema JSON doğrulaması
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
@@ -193,7 +271,8 @@ jobs:
           SCHEMA_DIR="app/schemas"
 
           if [ ! -d "$SCHEMA_DIR" ]; then
-            echo "Room schema dizini bulunamadı."
+            echo "app/schemas bulunamadı."
+            echo "Room schema kontrolü atlanıyor."
             exit 0
           fi
 
@@ -209,15 +288,82 @@ jobs:
               try:
                   with path.open("r", encoding="utf-8") as f:
                       json.load(f)
+
                   print(f"OK: {path}")
+
               except Exception as exc:
                   print(f"BOZUK: {path}")
                   print(f"HATA: {exc}")
                   errors.append(path)
 
           if errors:
+              print()
+              print("Room schema JSON hataları bulundu.")
               sys.exit(1)
+
+          print()
+          print("Room schema JSON kontrolü BAŞARILI.")
           PY
+
+      # ============================================================
+      # 9. RELEASE SIGNING DURUMU
+      # ============================================================
+
+      - name: Release imza durumunu belirle
+        id: signing
+        shell: bash
+        env:
+          NOVA_KEYSTORE_B64: ${{ secrets.NOVA_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${NOVA_KEYSTORE_B64:-}" ] && \
+             [ -n "${NOVA_KEY_ALIAS:-}" ] && \
+             [ -n "${NOVA_STORE_PASSWORD:-}" ] && \
+             [ -n "${NOVA_KEY_PASSWORD:-}" ]; then
+
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+
+            echo "Release imza secret'ları hazır."
+
+          else
+
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+
+            echo "::warning::Release imza secret'ları eksik."
+            echo "::warning::Debug/test APK derlemesi yapılacak."
+
+          fi
+
+      # ============================================================
+      # 10. KEYSTORE
+      # ============================================================
+
+      - name: Release imzasını hazırla
+        if: ${{ steps.signing.outputs.ready == 'true' }}
+        shell: bash
+        env:
+          NOVA_KEYSTORE_B64: ${{ secrets.NOVA_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+
+          umask 077
+
+          KEYSTORE_PATH="$RUNNER_TEMP/nova-release.keystore"
+
+          printf '%s' "$NOVA_KEYSTORE_B64" \
+            | base64 --decode \
+            > "$KEYSTORE_PATH"
+
+          test -s "$KEYSTORE_PATH"
+
+          echo "NOVA_KEYSTORE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+          echo "Release keystore hazır."
+
+      # ============================================================
+      # 11. TEMİZ DERLEME
+      # ============================================================
 
       - name: Clean
         working-directory: ${{ steps.project.outputs.project_dir }}
@@ -231,347 +377,314 @@ jobs:
             --stacktrace \
             --console=plain
 
-      - name: Build APK variants
+      # ============================================================
+      # 12. GERÇEK RELEASE BUILD
+      #
+      # Kaynakta gerçekten bulunan özel task:
+      # buildNovaDistributionRelease
+      #
+      # Bunun altında:
+      # bundleNovaPlayRelease
+      # assembleNovaIndependentRelease
+      #
+      # çalışıyor.
+      # ============================================================
+
+      - name: Gerçek Nova dağıtım derlemesi
+        if: ${{ steps.signing.outputs.ready == 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü') }}
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
 
           ./gradlew \
-            :app:assembleIndependentLiteDebug \
-            :app:assembleIndependentProDebug \
-            :app:assemblePlayLiteDebug \
-            :app:assemblePlayProDebug \
+            :app:buildNovaDistributionRelease \
             --no-daemon \
             --max-workers=2 \
             --stacktrace \
             --console=plain
 
-      - name: Inspect APK outputs
+      # ============================================================
+      # 13. SADECE BAĞIMSIZ
+      # ============================================================
+
+      - name: Bağımsız Lite + Pro release APK
+        if: ${{ steps.signing.outputs.ready == 'true' && inputs.hedef == 'bağımsız' }}
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
+
+          ./gradlew clean \
+            :app:assembleNovaIndependentRelease \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      # ============================================================
+      # 14. SADECE GOOGLE PLAY
+      # ============================================================
+
+      - name: Google Play Lite + Pro AAB
+        if: ${{ steps.signing.outputs.ready == 'true' && inputs.hedef == 'google-play' }}
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew clean \
+            :app:bundleNovaPlayRelease \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      # ============================================================
+      # 15. SIGNING YOKSA DEBUG BUILD
+      # ============================================================
+
+      - name: İmza yoksa Bağımsız + Google Play debug APK
+        if: ${{ steps.signing.outputs.ready != 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü') }}
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assembleNovaPlayDebug \
+            :app:assembleNovaIndependentDebug \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      # ============================================================
+      # 16. BAĞIMSIZ DEBUG
+      # ============================================================
+
+      - name: Bağımsız debug APK
+        if: ${{ steps.signing.outputs.ready != 'true' && inputs.hedef == 'bağımsız' }}
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew clean \
+            :app:assembleNovaIndependentDebug \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      # ============================================================
+      # 17. GOOGLE PLAY DEBUG
+      # ============================================================
+
+      - name: Google Play debug APK
+        if: ${{ steps.signing.outputs.ready != 'true' && inputs.hedef == 'google-play' }}
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew clean \
+            :app:assembleNovaPlayDebug \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            --console=plain
+
+      # ============================================================
+      # 18. OUTPUT KONTROLÜ
+      # ============================================================
+
+      - name: Build çıktılarını göster
+        if: always()
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          echo
+          echo "=========================================="
+          echo "APK OUTPUTS"
+          echo "=========================================="
 
           find app/build/outputs/apk \
             -type f \
             -name "*.apk" \
             -print \
-            -exec ls -lh "{}" \;
+            -exec ls -lh "{}" \; \
+            2>/dev/null || true
 
-      - name: Prepare APK artifacts
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf "$GITHUB_WORKSPACE/artifacts"
-
-          mkdir -p \
-            "$GITHUB_WORKSPACE/artifacts/Nova İndir Bağımsız Lite APK" \
-            "$GITHUB_WORKSPACE/artifacts/Nova İndir Bağımsız Pro APK" \
-            "$GITHUB_WORKSPACE/artifacts/Nova İndir Google Play Lite APK" \
-            "$GITHUB_WORKSPACE/artifacts/Nova İndir Google Play Pro APK"
-
-          python3 <<'PY'
-          from pathlib import Path
-          import shutil
-          import os
-          import re
-          import sys
-
-          root = Path("app/build/outputs/apk")
-
-          variants = {
-              "Nova İndir Bağımsız Lite APK": "independentlite",
-              "Nova İndir Bağımsız Pro APK": "independentpro",
-              "Nova İndir Google Play Lite APK": "playlite",
-              "Nova İndir Google Play Pro APK": "playpro",
-          }
-
-          artifact_root = Path(os.environ["GITHUB_WORKSPACE"]) / "artifacts"
-
-          apk_files = sorted(root.rglob("*.apk"))
-
-          if not apk_files:
-              print("HATA: APK bulunamadı.")
-              sys.exit(1)
-
-          def normalized(value):
-              return re.sub(r"[^a-z0-9]", "", value.lower())
-
-          for name, token in variants.items():
-
-              matches = []
-
-              for apk in apk_files:
-                  relative = normalized(str(apk.relative_to(root)))
-
-                  if token in relative:
-                      matches.append(apk)
-
-              print(f"{name} adayları:")
-
-              for match in matches:
-                  print(f"  {match}")
-
-              if len(matches) != 1:
-                  print(
-                      f"HATA: {name} için tam olarak 1 APK bekleniyor. "
-                      f"Bulunan: {len(matches)}"
-                  )
-                  sys.exit(1)
-
-              source = matches[0]
-
-              target_dir = artifact_root / name
-              target = target_dir / f"{name}.apk"
-
-              shutil.copy2(source, target)
-
-              print(f"SEÇİLDİ: {source}")
-              print(f"HEDEF:   {target}")
-
-          print("APK artifact hazırlığı tamamlandı.")
-          PY
-
-      - name: Verify APK artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          for DIR in \
-            "Nova İndir Bağımsız Lite APK" \
-            "Nova İndir Bağımsız Pro APK" \
-            "Nova İndir Google Play Lite APK" \
-            "Nova İndir Google Play Pro APK"
-          do
-            COUNT="$(
-              find "$GITHUB_WORKSPACE/artifacts/$DIR" \
-                -type f \
-                -name "*.apk" \
-                | wc -l
-            )"
-
-            echo "$DIR = $COUNT APK"
-
-            if [ "$COUNT" -ne 1 ]; then
-              echo "::error::$DIR içinde tam olarak 1 APK olmalı."
-              exit 1
-            fi
-          done
-
-      - name: Upload Nova İndir Bağımsız Lite APK
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Bağımsız Lite APK
-          path: artifacts/Nova İndir Bağımsız Lite APK/*.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Nova İndir Bağımsız Pro APK
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Bağımsız Pro APK
-          path: artifacts/Nova İndir Bağımsız Pro APK/*.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Nova İndir Google Play Lite APK
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Lite APK
-          path: artifacts/Nova İndir Google Play Lite APK/*.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Nova İndir Google Play Pro APK
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Pro APK
-          path: artifacts/Nova İndir Google Play Pro APK/*.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Build Google Play Lite AAB
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ./gradlew \
-            :app:bundlePlayLiteRelease \
-            --no-daemon \
-            --max-workers=2 \
-            --stacktrace \
-            --console=plain
-
-      - name: Build Google Play Pro AAB
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ./gradlew \
-            :app:bundlePlayProRelease \
-            --no-daemon \
-            --max-workers=2 \
-            --stacktrace \
-            --console=plain
-
-      - name: Inspect AAB outputs
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo
+          echo "=========================================="
+          echo "AAB OUTPUTS"
+          echo "=========================================="
 
           find app/build/outputs/bundle \
             -type f \
             -name "*.aab" \
             -print \
-            -exec ls -lh "{}" \;
+            -exec ls -lh "{}" \; \
+            2>/dev/null || true
 
-      - name: Prepare AAB artifacts
+          echo
+          echo "=========================================="
+          echo "NOVA OUTPUT DIRECTORIES"
+          echo "=========================================="
+
+          find . \
+            -maxdepth 3 \
+            -type d \
+            \( \
+              -name "Nova İndir * Google Play" \
+              -o \
+              -name "Nova İndir * Bağımsız" \
+            \) \
+            -print \
+            2>/dev/null || true
+
+      # ============================================================
+      # 19. EXACT RELEASE ARTIFACT KONTROLÜ
+      # ============================================================
+
+      - name: Release çıktılarının tekilliğini doğrula
+        if: ${{ steps.signing.outputs.ready == 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü') }}
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf "$GITHUB_WORKSPACE/aab-artifacts"
+          PLAY_DIR="$(find . -maxdepth 2 -type d -name '* Google Play' | head -1)"
+          INDEPENDENT_DIR="$(find . -maxdepth 2 -type d -name '* Bağımsız' | head -1)"
 
-          mkdir -p \
-            "$GITHUB_WORKSPACE/aab-artifacts/Nova İndir Google Play Lite AAB" \
-            "$GITHUB_WORKSPACE/aab-artifacts/Nova İndir Google Play Pro AAB"
+          if [ -z "$PLAY_DIR" ]; then
+            echo "::error::Google Play çıktı klasörü bulunamadı."
+            exit 1
+          fi
 
-          python3 <<'PY'
-          from pathlib import Path
-          import shutil
-          import os
-          import re
-          import sys
+          if [ -z "$INDEPENDENT_DIR" ]; then
+            echo "::error::Bağımsız çıktı klasörü bulunamadı."
+            exit 1
+          fi
 
-          root = Path("app/build/outputs/bundle")
+          echo "Google Play:"
+          find "$PLAY_DIR" \
+            -type f \
+            -name "*.aab" \
+            -print \
+            -exec ls -lh "{}" \;
 
-          variants = {
-              "Nova İndir Google Play Lite AAB": "playlite",
-              "Nova İndir Google Play Pro AAB": "playpro",
-          }
+          echo
+          echo "Bağımsız:"
+          find "$INDEPENDENT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print \
+            -exec ls -lh "{}" \;
 
-          artifact_root = (
-              Path(os.environ["GITHUB_WORKSPACE"]) / "aab-artifacts"
-          )
+          PLAY_COUNT="$(find "$PLAY_DIR" -type f -name '*.aab' | wc -l)"
+          INDEPENDENT_COUNT="$(find "$INDEPENDENT_DIR" -type f -name '*.apk' | wc -l)"
 
-          aab_files = sorted(root.rglob("*.aab"))
+          if [ "$PLAY_COUNT" -ne 2 ]; then
+            echo "::error::Google Play tarafında tam olarak 2 AAB bekleniyor. Bulunan: $PLAY_COUNT"
+            exit 1
+          fi
 
-          if not aab_files:
-              print("HATA: AAB bulunamadı.")
-              sys.exit(1)
+          if [ "$INDEPENDENT_COUNT" -ne 2 ]; then
+            echo "::error::Bağımsız tarafında tam olarak 2 APK bekleniyor. Bulunan: $INDEPENDENT_COUNT"
+            exit 1
+          fi
 
-          def normalized(value):
-              return re.sub(r"[^a-z0-9]", "", value.lower())
+          echo
+          echo "Release çıktı kontrolü BAŞARILI."
 
-          for name, token in variants.items():
+      # ============================================================
+      # 20. GOOGLE PLAY AAB ARTIFACT
+      # ============================================================
 
-              matches = []
+      - name: Google Play AAB yükle
+        if: ${{ steps.signing.outputs.ready == 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü' || inputs.hedef == 'google-play') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: Nova İndir Google Play AAB
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova İndir * Google Play/*.aab
+          if-no-files-found: error
+          retention-days: 30
 
-              for aab in aab_files:
-                  relative = normalized(str(aab.relative_to(root)))
+      # ============================================================
+      # 21. BAĞIMSIZ APK ARTIFACT
+      # ============================================================
 
-                  if token in relative:
-                      matches.append(aab)
+      - name: Bağımsız APK yükle
+        if: ${{ steps.signing.outputs.ready == 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü' || inputs.hedef == 'bağımsız') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: Nova İndir Bağımsız APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova İndir * Bağımsız/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
-              print(f"{name} adayları:")
+      # ============================================================
+      # 22. DEBUG GOOGLE PLAY
+      # ============================================================
 
-              for match in matches:
-                  print(f"  {match}")
+      - name: Google Play debug APK yükle
+        if: ${{ steps.signing.outputs.ready != 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü' || inputs.hedef == 'google-play') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: Nova İndir Google Play Test APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova İndir * Google Play Test/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
-              if len(matches) != 1:
-                  print(
-                      f"HATA: {name} için tam olarak 1 AAB bekleniyor. "
-                      f"Bulunan: {len(matches)}"
-                  )
-                  sys.exit(1)
+      # ============================================================
+      # 23. DEBUG BAĞIMSIZ
+      # ============================================================
 
-              source = matches[0]
+      - name: Bağımsız debug APK yükle
+        if: ${{ steps.signing.outputs.ready != 'true' && (github.event_name == 'push' || inputs.hedef == 'tümü' || inputs.hedef == 'bağımsız') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: Nova İndir Bağımsız Test APK
+          path: |
+            ${{ steps.project.outputs.project_dir }}/Nova İndir * Bağımsız Test/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
-              target_dir = artifact_root / name
-              target = target_dir / f"{name}.aab"
+      # ============================================================
+      # 24. SHA-256 RAPORU
+      # ============================================================
 
-              shutil.copy2(source, target)
-
-              print(f"SEÇİLDİ: {source}")
-              print(f"HEDEF:   {target}")
-
-          print("AAB artifact hazırlığı tamamlandı.")
-          PY
-
-      - name: Verify AAB artifacts
+      - name: Çıktı SHA-256 raporu
+        if: always()
+        working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          set -euo pipefail
+          echo
+          echo "=========================================="
+          echo "NOVA İNDİR SHA-256"
+          echo "=========================================="
 
-          for DIR in \
-            "Nova İndir Google Play Lite AAB" \
-            "Nova İndir Google Play Pro AAB"
-          do
-            COUNT="$(
-              find "$GITHUB_WORKSPACE/aab-artifacts/$DIR" \
-                -type f \
-                -name "*.aab" \
-                | wc -l
-            )"
+          find . \
+            -type f \
+            \( -name "*.apk" -o -name "*.aab" \) \
+            -path "./Nova İndir *" \
+            -exec sha256sum "{}" \; \
+            2>/dev/null || true
 
-            echo "$DIR = $COUNT AAB"
+          echo
+          echo "Build tamamlandı."
 
-            if [ "$COUNT" -ne 1 ]; then
-              echo "::error::$DIR içinde tam olarak 1 AAB olmalı."
-              exit 1
-            fi
-          done
+      # ============================================================
+      # 25. GEÇİCİ KEYSTORE TEMİZLİĞİ
+      # ============================================================
 
-      - name: Upload Nova İndir Google Play Lite AAB
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Lite AAB
-          path: aab-artifacts/Nova İndir Google Play Lite AAB/*.aab
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Nova İndir Google Play Pro AAB
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Pro AAB
-          path: aab-artifacts/Nova İndir Google Play Pro AAB/*.aab
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Final SHA-256 report
+      - name: Geçici keystore'u sil
         if: always()
         shell: bash
         run: |
-          echo
-          echo "=========================================="
-          echo "NOVA İNDİR BUILD OUTPUT"
-          echo "=========================================="
-          echo
-
-          if [ -d "$GITHUB_WORKSPACE/artifacts" ]; then
-            find "$GITHUB_WORKSPACE/artifacts" \
-              -type f \
-              -name "*.apk" \
-              -exec sha256sum "{}" \; \
-              -exec ls -lh "{}" \;
-          fi
-
-          echo
-
-          if [ -d "$GITHUB_WORKSPACE/aab-artifacts" ]; then
-            find "$GITHUB_WORKSPACE/aab-artifacts" \
-              -type f \
-              -name "*.aab" \
-              -exec sha256sum "{}" \; \
-              -exec ls -lh "{}" \;
-          fi
-
-          echo
-          echo "=========================================="
+          rm -f "$RUNNER_TEMP/nova-release.keystore" || true

@@ -18,13 +18,13 @@ concurrency:
 
 jobs:
   build:
-    name: Nova Indir Lite + Pro + Play + Independent
+    name: Nova Indir Lite + Pro + Play + Bağımsız
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     env:
       SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
-      EXPECTED_SHA256: ad4af671b416301b7cf78105bb786e513875e0d5195fa4308959bd5eed2afbe0
+      EXPECTED_SHA256: 86c25840f9e82a1efcb32178eb77b2971677b6977fc9c78971a27dc517cf4cbc
       GRADLE_OPTS: -Dfile.encoding=UTF-8
 
     steps:
@@ -172,8 +172,8 @@ jobs:
           TASKS="$GITHUB_WORKSPACE/gradle-tasks.txt"
 
           REQUIRED_TASKS=(
-            "assembleIndependentLiteDebug"
-            "assembleIndependentProDebug"
+            "assembleBağımsızLiteDebug"
+            "assembleBağımsızProDebug"
             "assemblePlayLiteDebug"
             "assemblePlayProDebug"
             "bundlePlayLiteRelease"
@@ -187,7 +187,7 @@ jobs:
             fi
           done
 
-          echo "Tum gerekli Lite/Pro/Play/Independent task'lari mevcut."
+          echo "Tum gerekli Lite/Pro/Play/Bağımsız task'lari mevcut."
 
       - name: Validate Room schema files
         working-directory: ${{ steps.project.outputs.project_dir }}
@@ -251,28 +251,28 @@ jobs:
             --stacktrace \
             --console=plain
 
-      - name: Build Independent Lite APK
+      - name: Build Bağımsız Lite APK
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
 
           ./gradlew \
-            :app:assembleIndependentLiteDebug \
+            :app:assembleBağımsızLiteDebug \
             -PNOVA_APK_SPLITS=true \
             --no-daemon \
             --max-workers=2 \
             --stacktrace \
             --console=plain
 
-      - name: Build Independent Pro APK
+      - name: Build Bağımsız Pro APK
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
 
           ./gradlew \
-            :app:assembleIndependentProDebug \
+            :app:assembleBağımsızProDebug \
             -PNOVA_APK_SPLITS=true \
             --no-daemon \
             --max-workers=2 \
@@ -325,20 +325,20 @@ jobs:
 
           echo "APK ciktilari mevcut."
 
-      - name: Upload Independent Lite APK
+      - name: Upload Bağımsız Lite APK
         uses: actions/upload-artifact@v4
         with:
-          name: Nova-Indir-Independent-Lite
+          name: Nova-Indir-Bağımsız-Lite
           path: |
             ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/IndependentLite/**/*.apk
             ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload Independent Pro APK
+      - name: Upload Bağımsız Pro APK
         uses: actions/upload-artifact@v4
         with:
-          name: Nova-Indir-Independent-Pro
+          name: Nova-Indir-Bağımsız-Pro
           path: |
             ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/IndependentPro/**/*.apk
             ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk

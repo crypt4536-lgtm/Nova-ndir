@@ -24,7 +24,7 @@ jobs:
 
     env:
       SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
-      EXPECTED_SHA256: 86c25840f9e82a1efcb32178eb77b2971677b6977fc9c78971a27dc517cf4cbc
+      EXPECTED_SHA256: ad4af671b416301b7cf78105bb786e513875e0d5195fa4308959bd5eed2afbe0
       GRADLE_OPTS: -Dfile.encoding=UTF-8
 
     steps:

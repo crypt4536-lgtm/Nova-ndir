@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip"
+      - "Nova-Indir-main_Checkpoint-052_Source.zip"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 60
 
     env:
-      SOURCE_ZIP: Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip
+      SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
       EXPECTED_SHA256: ad4af671b416301b7cf78105bb786e513875e0d5195fa4308959bd5eed2afbe0
       GRADLE_OPTS: -Dfile.encoding=UTF-8
 

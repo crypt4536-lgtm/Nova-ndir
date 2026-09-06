@@ -82,20 +82,20 @@ jobs:
           set -euo pipefail
           SDK_ROOT="$ANDROID_SDK_ROOT"
           mkdir -p "$SDK_ROOT/cmdline-tools"
-          if ! command -v sdkmanager >/dev/null 2>&1; then
+          if [ ! -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
             curl -fsSL -o "$RUNNER_TEMP/commandlinetools.zip" https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
-            rm -rf "$SDK_ROOT/cmdline-tools/latest"
-            mkdir -p "$SDK_ROOT/cmdline-tools/latest"
+            rm -rf "$SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            mkdir -p "$SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
             unzip -q "$RUNNER_TEMP/commandlinetools.zip" -d "$RUNNER_TEMP/android-cmdline-tools"
             mv "$RUNNER_TEMP/android-cmdline-tools/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/"
           fi
           export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$PATH"
           echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-36"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36"
           echo "Android SDK hazır."
-          sdkmanager --list_installed | grep -E 'platform-tools|platforms;android-36' || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --list_installed | grep -E 'platform-tools|platforms;android-36' || true
 
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -148,13 +148,24 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${NOVA_KEYSTORE_B64:-}" ] && [ -n "${NOVA_KEY_ALIAS:-}" ] && [ -n "${NOVA_STORE_PASSWORD:-}" ] && [ -n "${NOVA_KEY_PASSWORD:-}" ]; then
-            echo "Release signing hazır."
             umask 077
             KEYSTORE_PATH="$RUNNER_TEMP/nova-release.keystore"
             printf '%s' "$NOVA_KEYSTORE_B64" | base64 --decode > "$KEYSTORE_PATH"
             test -s "$KEYSTORE_PATH"
+
+            echo "Keystore doğrulanıyor..."
+            keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" >/dev/null
+            keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" -alias "$NOVA_KEY_ALIAS" >/dev/null
+            echo "Keystore ve alias doğrulaması BAŞARILI."
+
+            # build.gradle.kts reads these values from the process environment.
+            # GITHUB_ENV makes them available to every later workflow step.
             echo "NOVA_KEYSTORE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+            echo "NOVA_KEY_ALIAS=$NOVA_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "NOVA_STORE_PASSWORD=$NOVA_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "NOVA_KEY_PASSWORD=$NOVA_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Release signing hazır ve sonraki Gradle adımlarına aktarıldı."
           else
             echo "::warning::Release signing secretları eksik. Debug/test çıktıları üretilecek."
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -172,13 +183,17 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ steps.signing.outputs.ready }}" = "true" ]; then
-            mapfile -t TASKS < <(grep -E '^(assemble|bundle|build).*Nova.*(Independent|Play).*(Release)$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
+            test -n "${NOVA_KEYSTORE:-}" || { echo "::error::NOVA_KEYSTORE Gradle adımına aktarılmadı."; exit 1; }
+            test -n "${NOVA_KEY_ALIAS:-}" || { echo "::error::NOVA_KEY_ALIAS Gradle adımına aktarılmadı."; exit 1; }
+            test -n "${NOVA_STORE_PASSWORD:-}" || { echo "::error::NOVA_STORE_PASSWORD Gradle adımına aktarılmadı."; exit 1; }
+            test -n "${NOVA_KEY_PASSWORD:-}" || { echo "::error::NOVA_KEY_PASSWORD Gradle adımına aktarılmadı."; exit 1; }
+            test -f "$NOVA_KEYSTORE" || { echo "::error::NOVA_KEYSTORE dosyası bulunamadı."; exit 1; }
+            echo "Canonical distribution task: buildNovaDistributionRelease"
+            ./gradlew :app:buildNovaDistributionRelease --no-daemon --max-workers=1 --stacktrace --console=plain
           else
-            mapfile -t TASKS < <(grep -E '^(assemble|bundle).*Nova.*(Independent|Play).*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
+            echo "::error::Release signing olmadan 'tümü' hedefi çalıştırılamaz. Release çıktıları için dört signing secret'ı sağlayın."
+            exit 1
           fi
-          test "${#TASKS[@]}" -gt 0 || { echo "::error::Nova build taskı bulunamadı."; exit 1; }
-          printf ' - %s\n' "${TASKS[@]}"
-          ./gradlew "${TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
 
       - name: Yalnız Bağımsız derle
         if: ${{ inputs.hedef == 'bağımsız' }}
@@ -187,13 +202,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ steps.signing.outputs.ready }}" = "true" ]; then
-            mapfile -t TASKS < <(grep -E '^assemble.*Nova.*Independent.*Release$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
+            ./gradlew :app:assembleNovaIndependentRelease --no-daemon --max-workers=1 --stacktrace --console=plain
           else
-            mapfile -t TASKS < <(grep -E '^assemble.*Nova.*Independent.*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
+            ./gradlew :app:assembleNovaIndependentDebug --no-daemon --max-workers=1 --stacktrace --console=plain
           fi
-          test "${#TASKS[@]}" -gt 0 || { echo "::error::Bağımsız hedef için uygun assemble taskı bulunamadı."; exit 1; }
-          printf ' - %s\n' "${TASKS[@]}"
-          ./gradlew "${TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
 
       - name: Yalnız Google Play derle
         if: ${{ inputs.hedef == 'google-play' }}
@@ -202,21 +214,22 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ steps.signing.outputs.ready }}" = "true" ]; then
-            mapfile -t TASKS < <(grep -E '^bundle.*Nova.*Play.*Release$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
+            ./gradlew :app:bundleNovaPlayRelease --no-daemon --max-workers=1 --stacktrace --console=plain
           else
-            mapfile -t TASKS < <(grep -E '^bundle.*Nova.*Play.*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
+            ./gradlew :app:exportNovaPlayDebugApks --no-daemon --max-workers=1 --stacktrace --console=plain
           fi
-          test "${#TASKS[@]}" -gt 0 || { echo "::error::Google Play için uygun bundle taskı bulunamadı."; exit 1; }
-          printf ' - %s\n' "${TASKS[@]}"
-          ./gradlew "${TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
 
       - name: Build çıktılarını göster
         if: always()
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          echo "APK:"; find app/build/outputs/apk -type f -name "*.apk" -print 2>/dev/null || true
-          echo "AAB:"; find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
+          echo "APK:"
+          find app/build/outputs/apk -type f -name "*.apk" -print 2>/dev/null || true
+          echo "AAB:"
+          find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
+          echo "Nova dağıtım klasörleri:"
+          find . -maxdepth 3 -type d \( -name "Nova*Google Play*" -o -name "Nova*Bağımsız*" \) -print 2>/dev/null || true
 
       - name: Geçici imza dosyasını temizle
         if: always()

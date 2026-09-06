@@ -152,14 +152,10 @@ jobs:
             KEYSTORE_PATH="$RUNNER_TEMP/nova-release.keystore"
             printf '%s' "$NOVA_KEYSTORE_B64" | base64 --decode > "$KEYSTORE_PATH"
             test -s "$KEYSTORE_PATH"
-
             echo "Keystore doğrulanıyor..."
             keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" >/dev/null
             keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" -alias "$NOVA_KEY_ALIAS" >/dev/null
             echo "Keystore ve alias doğrulaması BAŞARILI."
-
-            # build.gradle.kts reads these values from the process environment.
-            # GITHUB_ENV makes them available to every later workflow step.
             echo "NOVA_KEYSTORE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
             echo "NOVA_KEY_ALIAS=$NOVA_KEY_ALIAS" >> "$GITHUB_ENV"
             echo "NOVA_STORE_PASSWORD=$NOVA_STORE_PASSWORD" >> "$GITHUB_ENV"
@@ -230,6 +226,26 @@ jobs:
           find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
           echo "Nova dağıtım klasörleri:"
           find . -maxdepth 3 -type d \( -name "Nova*Google Play*" -o -name "Nova*Bağımsız*" \) -print 2>/dev/null || true
+
+      - name: Google Play çıktısını artifact olarak yükle
+        if: ${{ success() && (inputs.hedef == 'tümü' || inputs.hedef == 'google-play') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-indir-google-play
+          path: ${{ steps.project.outputs.project_dir }}/Nova İndir 0.10.0 Google Play/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Bağımsız çıktıyı artifact olarak yükle
+        if: ${{ success() && (inputs.hedef == 'tümü' || inputs.hedef == 'bağımsız') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-indir-bagimsiz
+          path: ${{ steps.project.outputs.project_dir }}/Nova İndir 0.10.0 Bağımsız/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
       - name: Geçici imza dosyasını temizle
         if: always()

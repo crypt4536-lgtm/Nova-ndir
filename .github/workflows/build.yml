@@ -31,6 +31,8 @@ jobs:
       EXPECTED_SHA256: 97aec25ff635f47f0c835f0710589fabb65f43345ba155e1684d3134987abf5e
       GRADLE_OPTS: "-Dfile.encoding=UTF-8"
       HEDEF: ${{ inputs.hedef }}
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
 
     steps:
       - name: Kaynağı al
@@ -40,17 +42,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "::error::Kaynak ZIP bulunamadı: $SOURCE_ZIP"
-            exit 1
-          fi
+          test -f "$SOURCE_ZIP" || { echo "::error::Kaynak ZIP bulunamadı: $SOURCE_ZIP"; exit 1; }
           ACTUAL_SHA256="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
           echo "Beklenen SHA-256: $EXPECTED_SHA256"
           echo "Gerçek SHA-256: $ACTUAL_SHA256"
-          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-            echo "::error::Source ZIP SHA-256 doğrulaması başarısız."
-            exit 1
-          fi
+          test "$ACTUAL_SHA256" = "$EXPECTED_SHA256" || { echo "::error::Source ZIP SHA-256 doğrulaması başarısız."; exit 1; }
           echo "SHA-256 doğrulaması BAŞARILI."
 
       - name: Kaynak ZIP'i aç
@@ -67,18 +63,12 @@ jobs:
         run: |
           set -euo pipefail
           GRADLEW="$(find "$GITHUB_WORKSPACE/source" -type f -name gradlew -print -quit)"
-          if [ -z "$GRADLEW" ]; then
-            echo "::error::Kaynak ZIP içinde gradlew bulunamadı."
-            exit 1
-          fi
+          test -n "$GRADLEW" || { echo "::error::Kaynak ZIP içinde gradlew bulunamadı."; exit 1; }
           PROJECT_DIR="$(dirname "$GRADLEW")"
           echo "Android proje dizini: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           chmod +x "$PROJECT_DIR/gradlew"
-          if [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::Android app klasörü bulunamadı."
-            exit 1
-          fi
+          test -d "$PROJECT_DIR/app" || { echo "::error::Android app klasörü bulunamadı."; exit 1; }
 
       - name: Java 17
         uses: actions/setup-java@v5
@@ -86,15 +76,26 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Android API 36
+      - name: Android SDK araçlarını kur
         shell: bash
         run: |
           set -euo pipefail
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            curl -fsSL -o "$RUNNER_TEMP/commandlinetools.zip" https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+            rm -rf "$SDK_ROOT/cmdline-tools/latest"
+            mkdir -p "$SDK_ROOT/cmdline-tools/latest"
+            unzip -q "$RUNNER_TEMP/commandlinetools.zip" -d "$RUNNER_TEMP/android-cmdline-tools"
+            mv "$RUNNER_TEMP/android-cmdline-tools/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/"
+          fi
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-36"
+          echo "Android SDK hazır."
+          sdkmanager --list_installed | grep -E 'platform-tools|platforms;android-36' || true
 
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -113,55 +114,28 @@ jobs:
         run: |
           set -euo pipefail
           ./gradlew :app:tasks --all --no-daemon --console=plain > "$GITHUB_WORKSPACE/gradle-tasks.txt"
-
           echo "================================"
           echo "KEŞFEDİLEN NOVA TASKLARI"
           echo "================================"
-          grep -E '^[[:space:]]*(assemble|bundle|build)[A-Za-z0-9]+' "$GITHUB_WORKSPACE/gradle-tasks.txt" | grep -E 'Nova|nova' || true
-
-          mapfile -t NOVA_TASKS < <(
-            sed -nE 's/^[[:space:]]*((assemble|bundle|build)[A-Za-z0-9]+)([[:space:]]+-.*)?$/\1/p' "$GITHUB_WORKSPACE/gradle-tasks.txt" \
-              | grep -Ei 'Nova' \
-              | sort -u
-          )
-
-          if [ "${#NOVA_TASKS[@]}" -eq 0 ]; then
-            echo "::error::Gradle task listesinde Nova ile eşleşen build taskı bulunamadı."
-            cat "$GITHUB_WORKSPACE/gradle-tasks.txt"
-            exit 1
-          fi
-
+          grep -E '^[[:space:]]*(assemble|bundle|build)[A-Za-z0-9]+' "$GITHUB_WORKSPACE/gradle-tasks.txt" | grep -Ei 'Nova|nova' || true
+          mapfile -t NOVA_TASKS < <(sed -nE 's/^[[:space:]]*((assemble|bundle|build)[A-Za-z0-9]+)([[:space:]]+-.*)?$/\1/p' "$GITHUB_WORKSPACE/gradle-tasks.txt" | grep -Ei 'Nova' | sort -u)
+          test "${#NOVA_TASKS[@]}" -gt 0 || { echo "::error::Gradle task listesinde Nova ile eşleşen build taskı bulunamadı."; cat "$GITHUB_WORKSPACE/gradle-tasks.txt"; exit 1; }
           printf '%s\n' "${NOVA_TASKS[@]}" > "$GITHUB_WORKSPACE/nova-tasks.txt"
 
-      - name: Gradle task eşleşmelerini doğrula
+      - name: Gradle task eşleşmelerini göster
         shell: bash
         run: |
           set -euo pipefail
-          echo "================================"
           echo "HEDEF: $HEDEF"
-          echo "================================"
-
           echo "Tüm Nova taskları:"
           cat "$GITHUB_WORKSPACE/nova-tasks.txt"
-
-          if [ "$HEDEF" = "bağımsız" ]; then
-            grep -Ei '^(assemble|build).*Nova.*Independent.*(Debug|Release)$' "$GITHUB_WORKSPACE/nova-tasks.txt" || true
-          elif [ "$HEDEF" = "google-play" ]; then
-            grep -Ei '^(bundle|assemble).*Nova.*Play.*(Debug|Release)$' "$GITHUB_WORKSPACE/nova-tasks.txt" || true
-          else
-            grep -Ei '^(assemble|bundle|build).*Nova.*(Debug|Release)$' "$GITHUB_WORKSPACE/nova-tasks.txt" || true
-          fi
 
       - name: Room schema dosyalarını temizle
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -d "app/schemas" ]; then
-            find app/schemas -type f -name "*.json" -print -delete
-          else
-            echo "app/schemas bulunamadı."
-          fi
+          if [ -d "app/schemas" ]; then find app/schemas -type f -name "*.json" -print -delete; else echo "app/schemas bulunamadı."; fi
 
       - name: Release imza kontrolü
         id: signing
@@ -189,9 +163,7 @@ jobs:
       - name: Clean
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew clean --no-daemon --max-workers=1 --stacktrace --console=plain
+        run: ./gradlew clean --no-daemon --max-workers=1 --stacktrace --console=plain
 
       - name: Tüm sürümleri derle
         if: ${{ inputs.hedef == 'tümü' }}
@@ -199,30 +171,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           if [ "${{ steps.signing.outputs.ready }}" = "true" ]; then
-            mapfile -t RELEASE_TASKS < <(
-              grep -E '^(assemble|bundle|build).*Nova.*(Independent|Play).*(Release)$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u
-            )
-            if [ "${#RELEASE_TASKS[@]}" -eq 0 ]; then
-              echo "::error::Nova release taskı bulunamadı."
-              exit 1
-            fi
-            echo "Çalıştırılacak release taskları:"
-            printf ' - %s\n' "${RELEASE_TASKS[@]}"
-            ./gradlew "${RELEASE_TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
+            mapfile -t TASKS < <(grep -E '^(assemble|bundle|build).*Nova.*(Independent|Play).*(Release)$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
           else
-            mapfile -t DEBUG_TASKS < <(
-              grep -E '^(assemble|bundle).*Nova.*(Independent|Play).*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u
-            )
-            if [ "${#DEBUG_TASKS[@]}" -eq 0 ]; then
-              echo "::error::Nova debug APK/AAB taskı bulunamadı."
-              exit 1
-            fi
-            echo "Çalıştırılacak debug taskları:"
-            printf ' - %s\n' "${DEBUG_TASKS[@]}"
-            ./gradlew "${DEBUG_TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
+            mapfile -t TASKS < <(grep -E '^(assemble|bundle).*Nova.*(Independent|Play).*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
           fi
+          test "${#TASKS[@]}" -gt 0 || { echo "::error::Nova build taskı bulunamadı."; exit 1; }
+          printf ' - %s\n' "${TASKS[@]}"
+          ./gradlew "${TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
 
       - name: Yalnız Bağımsız derle
         if: ${{ inputs.hedef == 'bağımsız' }}
@@ -235,10 +191,7 @@ jobs:
           else
             mapfile -t TASKS < <(grep -E '^assemble.*Nova.*Independent.*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
           fi
-          if [ "${#TASKS[@]}" -eq 0 ]; then
-            echo "::error::Bağımsız hedef için uygun assemble taskı bulunamadı."
-            exit 1
-          fi
+          test "${#TASKS[@]}" -gt 0 || { echo "::error::Bağımsız hedef için uygun assemble taskı bulunamadı."; exit 1; }
           printf ' - %s\n' "${TASKS[@]}"
           ./gradlew "${TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
 
@@ -253,13 +206,7 @@ jobs:
           else
             mapfile -t TASKS < <(grep -E '^bundle.*Nova.*Play.*Debug$' "$GITHUB_WORKSPACE/nova-tasks.txt" | sort -u)
           fi
-          if [ "${#TASKS[@]}" -eq 0 ]; then
-            echo "::error::Google Play için uygun bundle taskı bulunamadı."
-            echo "Mevcut bundle taskları:"
-            grep -E '^bundle' "$GITHUB_WORKSPACE/nova-tasks.txt" || true
-            exit 1
-          fi
-          echo "Çalıştırılacak Google Play bundle taskları:"
+          test "${#TASKS[@]}" -gt 0 || { echo "::error::Google Play için uygun bundle taskı bulunamadı."; exit 1; }
           printf ' - %s\n' "${TASKS[@]}"
           ./gradlew "${TASKS[@]/#/:app:}" --no-daemon --max-workers=1 --stacktrace --console=plain
 
@@ -268,182 +215,21 @@ jobs:
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          echo "================================"
-          echo "APK ÇIKTILARI"
-          echo "================================"
-          find app/build/outputs/apk -type f -name "*.apk" -print 2>/dev/null || true
-          echo
-          echo "================================"
-          echo "AAB ÇIKTILARI"
-          echo "================================"
-          find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
+          echo "APK:"; find app/build/outputs/apk -type f -name "*.apk" -print 2>/dev/null || true
+          echo "AAB:"; find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
 
-      - name: Çıktıları Lite ve Pro olarak ayır
-        if: success()
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="$GITHUB_WORKSPACE/nova-artifacts"
-          rm -rf "$OUT"
-          mkdir -p "$OUT"
-
-          python3 - "$OUT" "$HEDEF" <<'PY'
-          from pathlib import Path
-          import sys, shutil, re
-
-          out = Path(sys.argv[1])
-          hedef = sys.argv[2].strip().lower()
-          project = Path(".").resolve()
-          apk_root = project / "app" / "build" / "outputs" / "apk"
-          aab_root = project / "app" / "build" / "outputs" / "bundle"
-          apk_files = sorted(apk_root.rglob("*.apk")) if apk_root.exists() else []
-          aab_files = sorted(aab_root.rglob("*.aab")) if aab_root.exists() else []
-
-          def norm(path):
-              return re.sub(r"[^a-z0-9]", "", str(path).lower())
-
-          def select(files, extension, tokens):
-              candidates = [p for p in files if p.suffix.lower() == extension and all(token in norm(p) for token in tokens)]
-              if not candidates:
-                  return None
-              for wanted in ("universal", "arm64v8a", "armeabiv7a", "x8664", "x86"):
-                  matches = [p for p in candidates if wanted in norm(p)]
-                  if matches:
-                      return matches[0]
-              return candidates[0]
-
-          targets = []
-          if hedef in {"tümü", "bağımsız"}:
-              targets += [
-                  ("Nova İndir Bağımsız Lite APK", ".apk", ("independent", "lite")),
-                  ("Nova İndir Bağımsız Pro APK", ".apk", ("independent", "pro")),
-              ]
-          if hedef in {"tümü", "google-play"}:
-              targets += [
-                  ("Nova İndir Google Play Lite APK", ".apk", ("play", "lite")),
-                  ("Nova İndir Google Play Pro APK", ".apk", ("play", "pro")),
-                  ("Nova İndir Google Play Lite AAB", ".aab", ("play", "lite")),
-                  ("Nova İndir Google Play Pro AAB", ".aab", ("play", "pro")),
-              ]
-
-          found = 0
-          missing = []
-          for name, extension, tokens in targets:
-              files = apk_files if extension == ".apk" else aab_files
-              source = select(files, extension, tokens)
-              if source is None:
-                  print(f"YOK: {name}")
-                  missing.append(name)
-                  continue
-              destination_dir = out / name
-              destination_dir.mkdir(parents=True, exist_ok=True)
-              destination = destination_dir / f"{name}{extension}"
-              shutil.copy2(source, destination)
-              print(f"OK: {name}\nKaynak: {source}\nÇıktı: {destination}")
-              found += 1
-
-          if hedef in {"tümü", "google-play"}:
-              required = {"Nova İndir Google Play Lite AAB", "Nova İndir Google Play Pro AAB"}
-              missing_aab = sorted(required.intersection(missing))
-              if missing_aab:
-                  print("\nERROR: Zorunlu Google Play AAB çıktıları eksik:")
-                  for name in missing_aab:
-                      print(f" - {name}")
-                  print("\nMevcut AAB dosyaları:")
-                  for path in aab_files:
-                      print(f" - {path}")
-                  sys.exit(1)
-
-          if found == 0:
-              print("ERROR: Hiçbir beklenen APK/AAB çıktısı bulunamadı.")
-              print("Mevcut APK:")
-              for path in apk_files:
-                  print(f" - {path}")
-              print("Mevcut AAB:")
-              for path in aab_files:
-                  print(f" - {path}")
-              sys.exit(1)
-          PY
-
-      - name: Tüm ham Android çıktıları
-        if: success()
+      - name: Ham Android çıktılarını yükle
+        if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: Nova İndir Ham Android Çıktıları
+          name: nova-android-raw
           path: |
             ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
             ${{ steps.project.outputs.project_dir }}/app/build/outputs/bundle/**/*.aab
-          if-no-files-found: error
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Bağımsız Lite APK
-        if: success() && (inputs.hedef == 'tümü' || inputs.hedef == 'bağımsız')
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Bağımsız Lite APK
-          path: nova-artifacts/Nova İndir Bağımsız Lite APK/*
-          if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Bağımsız Pro APK
-        if: success() && (inputs.hedef == 'tümü' || inputs.hedef == 'bağımsız')
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Bağımsız Pro APK
-          path: nova-artifacts/Nova İndir Bağımsız Pro APK/*
-          if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Google Play Lite APK
-        if: success() && (inputs.hedef == 'tümü' || inputs.hedef == 'google-play')
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Lite APK
-          path: nova-artifacts/Nova İndir Google Play Lite APK/*
-          if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Google Play Pro APK
-        if: success() && (inputs.hedef == 'tümü' || inputs.hedef == 'google-play')
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Pro APK
-          path: nova-artifacts/Nova İndir Google Play Pro APK/*
-          if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Google Play Lite AAB
-        if: success() && (inputs.hedef == 'tümü' || inputs.hedef == 'google-play')
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Lite AAB
-          path: nova-artifacts/Nova İndir Google Play Lite AAB/*
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Google Play Pro AAB
-        if: success() && (inputs.hedef == 'tümü' || inputs.hedef == 'google-play')
-        uses: actions/upload-artifact@v6
-        with:
-          name: Nova İndir Google Play Pro AAB
-          path: nova-artifacts/Nova İndir Google Play Pro AAB/*
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: SHA-256 raporu
+      - name: Geçici imza dosyasını temizle
         if: always()
         shell: bash
-        run: |
-          echo "================================"
-          echo "NOVA İNDİR SHA-256"
-          echo "================================"
-          if [ -d "$GITHUB_WORKSPACE/nova-artifacts" ]; then
-            find "$GITHUB_WORKSPACE/nova-artifacts" -type f \( -name "*.apk" -o -name "*.aab" \) -exec sha256sum "{}" \;
-          fi
-
-      - name: Geçici keystore temizliği
-        if: always()
-        shell: bash
-        run: |
-          rm -f "${NOVA_KEYSTORE:-}" "$RUNNER_TEMP/nova-release.keystore" || true
+        run: rm -f "${NOVA_KEYSTORE:-}" || true

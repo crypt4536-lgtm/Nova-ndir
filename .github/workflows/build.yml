@@ -218,17 +218,6 @@ jobs:
           echo "APK:"; find app/build/outputs/apk -type f -name "*.apk" -print 2>/dev/null || true
           echo "AAB:"; find app/build/outputs/bundle -type f -name "*.aab" -print 2>/dev/null || true
 
-      - name: Ham Android çıktılarını yükle
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: nova-android-raw
-          path: |
-            ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/**/*.apk
-            ${{ steps.project.outputs.project_dir }}/app/build/outputs/bundle/**/*.aab
-          if-no-files-found: warn
-          retention-days: 14
-
       - name: Geçici imza dosyasını temizle
         if: always()
         shell: bash

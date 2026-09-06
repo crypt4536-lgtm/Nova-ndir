@@ -148,6 +148,7 @@ jobs:
           for TASK in \
             assembleNovaIndependentDebug \
             assembleNovaPlayDebug \
+            bundleNovaPlayDebug \
             assembleNovaIndependentRelease \
             bundleNovaPlayRelease \
             buildNovaDistributionRelease
@@ -217,7 +218,7 @@ jobs:
 
             echo "::warning::Release signing secretları eksik."
 
-            echo "Debug/test APK üretilecek."
+            echo "Debug/test APK + Google Play debug AAB üretilecek."
 
             echo "ready=false" >> "$GITHUB_OUTPUT"
 
@@ -255,10 +256,12 @@ jobs:
           else
 
             echo "Debug/test dağıtımı başlatılıyor."
+            echo "Google Play Lite + Pro debug AAB özellikle oluşturuluyor."
 
             ./gradlew \
               :app:assembleNovaIndependentDebug \
               :app:assembleNovaPlayDebug \
+              :app:bundleNovaPlayDebug \
               --no-daemon \
               --max-workers=1 \
               --stacktrace \
@@ -308,7 +311,11 @@ jobs:
 
           else
 
-            ./gradlew :app:assembleNovaPlayDebug \
+            echo "Release signing yok. Google Play debug AAB oluşturuluyor."
+
+            ./gradlew \
+              :app:assembleNovaPlayDebug \
+              :app:bundleNovaPlayDebug \
               --no-daemon \
               --max-workers=1 \
               --stacktrace \
@@ -360,6 +367,7 @@ jobs:
           import sys
           import shutil
           import re
+          import os
 
           out = Path(sys.argv[1])
           project = Path(".").resolve()
@@ -396,13 +404,6 @@ jobs:
 
               if not candidates:
                   return None
-
-              # Öncelik:
-              # 1 Universal
-              # 2 ARM64
-              # 3 ARMv7
-              # 4 x86_64
-              # 5 x86
 
               priority = [
                   "universal",
@@ -466,6 +467,7 @@ jobs:
           ]
 
           found = 0
+          missing = []
 
           for name, extension, tokens in targets:
 
@@ -486,6 +488,8 @@ jobs:
                   print(
                       f"YOK: {name}"
                   )
+
+                  missing.append(name)
 
                   continue
 
@@ -519,6 +523,39 @@ jobs:
               )
 
               found += 1
+
+          hedef = os.environ.get("INPUT_HEDEF", "").strip().lower()
+
+          # Tümü ve Google Play hedeflerinde AAB zorunludur.
+          # Eksik AAB artık sessizce yok sayılmayacak.
+          if hedef in {"tümü", "google-play"}:
+
+              required_aab = [
+                  "Nova İndir Google Play Lite AAB",
+                  "Nova İndir Google Play Pro AAB",
+              ]
+
+              missing_aab = [
+                  name
+                  for name in required_aab
+                  if name in missing
+              ]
+
+              if missing_aab:
+
+                  print()
+                  print("ERROR: Zorunlu Google Play AAB çıktıları eksik:")
+
+                  for name in missing_aab:
+                      print(f" - {name}")
+
+                  print()
+                  print("Mevcut AAB dosyaları:")
+
+                  for path in aab_files:
+                      print(f" - {path}")
+
+                  sys.exit(1)
 
           if found == 0:
 
@@ -577,7 +614,7 @@ jobs:
         with:
           name: Nova İndir Google Play Lite AAB
           path: nova-artifacts/Nova İndir Google Play Lite AAB/*
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 
       - name: Google Play Pro AAB
@@ -586,7 +623,7 @@ jobs:
         with:
           name: Nova İndir Google Play Pro AAB
           path: nova-artifacts/Nova İndir Google Play Pro AAB/*
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 
       - name: SHA-256 raporu

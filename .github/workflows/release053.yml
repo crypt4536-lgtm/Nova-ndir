@@ -1,0 +1,370 @@
+name: Nova Video İndir 0.53 Yayın
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - nova053-build
+    paths:
+      - '.github/workflows/release053.yml'
+      - '.github/scripts/Nova053Patch.py.gz.b64'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nova-video-indir-053-release
+  cancel-in-progress: false
+
+jobs:
+  build-validate-release:
+    name: 053 derle doğrula ve yayınla
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
+      SOURCE_SHA256: 97aec25ff635f47f0c835f0710589fabb65f43345ba155e1684d3134987abf5e
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      GRADLE_OPTS: -Dfile.encoding=UTF-8
+      NOVA_PLAY_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_PLAY.md
+      NOVA_INDEPENDENT_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_INDEPENDENT.md
+      RELEASE_TAG: '0.53'
+
+    steps:
+      - name: Repoyu al
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 052 kaynağını doğrula ve 053'e dönüştür
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$SOURCE_ZIP"
+          ACTUAL="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$SOURCE_SHA256" || { echo "::error::052 kaynak SHA256 uyuşmuyor"; exit 1; }
+
+          rm -rf "$GITHUB_WORKSPACE/source053"
+          mkdir -p "$GITHUB_WORKSPACE/source053"
+          unzip -q "$SOURCE_ZIP" -d "$GITHUB_WORKSPACE/source053"
+          GRADLEW="$(find "$GITHUB_WORKSPACE/source053" -type f -name gradlew -print -quit)"
+          test -n "$GRADLEW"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          base64 -d .github/scripts/Nova053Patch.py.gz.b64 | gzip -d > "$RUNNER_TEMP/Nova053Patch.py"
+          python3 "$RUNNER_TEMP/Nova053Patch.py" "$PROJECT_DIR"
+          python3 "$PROJECT_DIR/tools/check_checkpoint_053.py"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "053 kaynak statik doğrulaması BAŞARILI."
+
+      - name: 053 temiz kaynak ZIP'ini hazırla
+        id: sourcezip
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/source-stage/Nova Video İndir 053 Kaynak"
+          rm -rf "$RUNNER_TEMP/source-stage"
+          mkdir -p "$STAGE"
+          rsync -a \
+            --exclude '.gradle/' \
+            --exclude '.idea/' \
+            --exclude 'build/' \
+            --exclude 'app/build/' \
+            --exclude '*.iml' \
+            "$PROJECT_DIR/" "$STAGE/"
+          (cd "$RUNNER_TEMP/source-stage" && zip -qr "$GITHUB_WORKSPACE/Nova Video İndir 053 Kaynak.zip" 'Nova Video İndir 053 Kaynak')
+          HASH="$(sha256sum "$GITHUB_WORKSPACE/Nova Video İndir 053 Kaynak.zip" | awk '{print $1}')"
+          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Kaynak SHA256: $HASH"
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          if [ ! -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            curl -fsSL -o "$RUNNER_TEMP/commandlinetools.zip" https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+            rm -rf "$SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            mkdir -p "$SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            unzip -q "$RUNNER_TEMP/commandlinetools.zip" -d "$RUNNER_TEMP/android-cmdline-tools"
+            mv "$RUNNER_TEMP/android-cmdline-tools/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/"
+          fi
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/build-tools/36.0.0" >> "$GITHUB_PATH"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Release imzasını hazırla
+        shell: bash
+        env:
+          NOVA_KEYSTORE_B64: ${{ secrets.NOVA_KEYSTORE_B64 }}
+          NOVA_KEY_ALIAS: ${{ secrets.NOVA_KEY_ALIAS }}
+          NOVA_STORE_PASSWORD: ${{ secrets.NOVA_STORE_PASSWORD }}
+          NOVA_KEY_PASSWORD: ${{ secrets.NOVA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${NOVA_KEYSTORE_B64:-}"
+          test -n "${NOVA_KEY_ALIAS:-}"
+          test -n "${NOVA_STORE_PASSWORD:-}"
+          test -n "${NOVA_KEY_PASSWORD:-}"
+          umask 077
+          KEYSTORE_PATH="$RUNNER_TEMP/nova-release.keystore"
+          printf '%s' "$NOVA_KEYSTORE_B64" | base64 --decode > "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" -alias "$NOVA_KEY_ALIAS" >/dev/null
+          {
+            echo "NOVA_KEYSTORE=$KEYSTORE_PATH"
+            echo "NOVA_KEY_ALIAS=$NOVA_KEY_ALIAS"
+            echo "NOVA_STORE_PASSWORD=$NOVA_STORE_PASSWORD"
+            echo "NOVA_KEY_PASSWORD=$NOVA_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: 053 dört dağıtımı derle
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d app/schemas ]; then find app/schemas -type f -name '*.json' -delete; fi
+          ./gradlew clean :app:buildNovaDistributionRelease \
+            --no-daemon --max-workers=1 --stacktrace --console=plain
+
+      - name: Dört temiz çıktıyı doğrula
+        id: outputs
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          PLAY="$PROJECT_DIR/Nova Video İndir 0.53 Google Play"
+          IND="$PROJECT_DIR/Nova Video İndir 0.53 Bağımsız"
+          LITE_AAB="$PLAY/Nova Video İndir 0.53 Google Play Lite.aab"
+          PRO_AAB="$PLAY/Nova Video İndir 0.53 Google Play Pro.aab"
+          LITE_APK="$IND/Nova Video İndir 0.53 Bağımsız Lite.apk"
+          PRO_APK="$IND/Nova Video İndir 0.53 Bağımsız Pro.apk"
+          for f in "$LITE_AAB" "$PRO_AAB" "$LITE_APK" "$PRO_APK"; do
+            test -s "$f" || { echo "::error::Eksik çıktı: $f"; exit 1; }
+          done
+          OUT="$GITHUB_WORKSPACE/release-assets"
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          cp "$LITE_AAB" "$PRO_AAB" "$LITE_APK" "$PRO_APK" "$OUT/"
+          cp "$GITHUB_WORKSPACE/Nova Video İndir 053 Kaynak.zip" "$OUT/"
+          sha256sum "$OUT"/* | tee "$OUT/SHA256SUMS.txt"
+          ls -lh "$OUT"
+
+      - name: Bundletool 1.18.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/bundletool.jar" https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar
+          echo 'a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  '"$RUNNER_TEMP/bundletool.jar" | sha256sum -c -
+
+      - name: Google Play AAB teknik doğrulaması
+        shell: bash
+        run: |
+          set -euo pipefail
+          for AAB in \
+            'release-assets/Nova Video İndir 0.53 Google Play Lite.aab' \
+            'release-assets/Nova Video İndir 0.53 Google Play Pro.aab'; do
+            echo "=== $AAB ==="
+            java -jar "$RUNNER_TEMP/bundletool.jar" validate --bundle="$AAB"
+            jarsigner -verify "$AAB" >/dev/null
+            MANIFEST="$RUNNER_TEMP/$(basename "$AAB").manifest.txt"
+            java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle="$AAB" --module=base > "$MANIFEST"
+            grep -q 'targetSdkVersion.*36' "$MANIFEST" || { echo '::error::targetSdkVersion 36 değil'; exit 1; }
+            for BAD in MANAGE_EXTERNAL_STORAGE REQUEST_INSTALL_PACKAGES SYSTEM_ALERT_WINDOW FOREGROUND_SERVICE_SPECIAL_USE READ_MEDIA_VIDEO READ_MEDIA_IMAGES READ_MEDIA_AUDIO; do
+              if grep -q "$BAD" "$MANIFEST"; then echo "::error::Play manifestinde yasak/istenmeyen izin: $BAD"; exit 1; fi
+            done
+          done
+
+      - name: Play paketli yt-dlp EJS QuickJS ve 16 KB doğrulaması
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import io, subprocess, tempfile, zipfile
+          from pathlib import Path
+
+          for aab in [Path('release-assets/Nova Video İndir 0.53 Google Play Lite.aab'), Path('release-assets/Nova Video İndir 0.53 Google Play Pro.aab')]:
+              print('AUDIT', aab)
+              with zipfile.ZipFile(aab) as z:
+                  names=set(z.namelist())
+                  assert 'base/lib/arm64-v8a/libqjs.so' in names, 'arm64 QuickJS eksik'
+                  assert 'base/lib/armeabi-v7a/libqjs.so' in names, 'armv7 QuickJS eksik'
+                  raw=z.read('base/res/raw/ytdlp')
+                  off=raw.find(b'PK\x03\x04')
+                  assert off >= 0, 'Paketli yt-dlp ZIP payload bulunamadı'
+                  with zipfile.ZipFile(io.BytesIO(raw[off:])) as yz:
+                      yn=set(yz.namelist())
+                      for req in ['yt_dlp_ejs/_version.py','yt_dlp_ejs/yt/solver/core.min.js','yt_dlp_ejs/yt/solver/lib.min.js']:
+                          assert req in yn, f'Paketli EJS eksik: {req}'
+                  arm64=[n for n in names if n.startswith('base/lib/arm64-v8a/') and n.endswith('.so')]
+                  with tempfile.TemporaryDirectory() as td:
+                      for n in arm64:
+                          data=z.read(n)
+                          if data[:4] != b'\x7fELF':
+                              continue
+                          p=Path(td)/Path(n).name
+                          p.write_bytes(data)
+                          out=subprocess.check_output(['readelf','-lW',str(p)], text=True, errors='replace')
+                          aligns=[]
+                          for line in out.splitlines():
+                              if line.lstrip().startswith('LOAD'):
+                                  try: aligns.append(int(line.split()[-1],16))
+                                  except Exception: pass
+                          assert aligns and min(aligns) >= 0x4000, f'16 KB hizalama başarısız: {n} {aligns}'
+          print('Play paketli motor/EJS/QuickJS/16KB: PASS')
+          PY
+
+      - name: Play sınıf ayrımı ve Bağımsız özellik tamlığı
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, zipfile
+          from pathlib import Path
+
+          play_forbidden=[b'PetOverlayService',b'ApkDownloaderActivity',b'UpdateCenterActivity',b'ApkTranslationActivity']
+          play_required=[b'PlayerActivity',b'BrowserActivity',b'GalleryActivity',b'AccountManagerActivity',b'YtDlpDownloadService']
+          independent_extra=[b'PetOverlayService',b'ApkDownloaderActivity',b'UpdateCenterActivity',b'ApkTranslationActivity']
+
+          def dex_blob(path):
+              with zipfile.ZipFile(path) as z:
+                  return b'\n'.join(z.read(n) for n in z.namelist() if re.search(r'(?:^|/)classes\d*\.dex$', n))
+
+          for aab in [Path('release-assets/Nova Video İndir 0.53 Google Play Lite.aab'),Path('release-assets/Nova Video İndir 0.53 Google Play Pro.aab')]:
+              blob=dex_blob(aab)
+              for s in play_required: assert s in blob, f'Play ortak özellik eksik: {s.decode()}'
+              for s in play_forbidden: assert s not in blob, f'Play paketine Bağımsız sınıf sızdı: {s.decode()}'
+
+          for apk in [Path('release-assets/Nova Video İndir 0.53 Bağımsız Lite.apk'),Path('release-assets/Nova Video İndir 0.53 Bağımsız Pro.apk')]:
+              blob=dex_blob(apk)
+              for s in play_required + independent_extra: assert s in blob, f'Bağımsız özellik eksik: {s.decode()}'
+          print('Play/Bağımsız özellik matrisi: PASS')
+          PY
+
+      - name: Bağımsız APK imzalarını doğrula
+        shell: bash
+        run: |
+          set -euo pipefail
+          for APK in \
+            'release-assets/Nova Video İndir 0.53 Bağımsız Lite.apk' \
+            'release-assets/Nova Video İndir 0.53 Bağımsız Pro.apk'; do
+            apksigner verify --verbose --print-certs "$APK"
+          done
+
+      - name: 053 kaynak ve normal build workflow'unu hazırla
+        shell: bash
+        env:
+          SOURCE_HASH: ${{ steps.sourcezip.outputs.sha256 }}
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          for DOC in PRIVACY_PLAY.md PRIVACY_INDEPENDENT.md DATA_SAFETY_PLAY.md PLAY_RELEASE_CHECKLIST.md CHECKPOINT_053_REPORT.md; do
+            test -f "$PROJECT_DIR/$DOC" && cp "$PROJECT_DIR/$DOC" "$GITHUB_WORKSPACE/$DOC"
+          done
+          cat > README.md <<'EOF'
+          # Nova Video İndir
+
+          Android video indirme uygulaması.
+
+          Güncel sürüm: **0.53**  
+          Checkpoint: **053**
+
+          Dağıtımlar:
+          - Google Play: Lite / Pro AAB
+          - Bağımsız: Lite / Pro APK
+
+          Kullanıcıya görünen dağıtım adı **Bağımsız**dır. Teknik Gradle flavor adları yalnız kaynak içinde kullanılır.
+          EOF
+          sed -i 's/^          //' README.md
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re
+          p=Path('.github/workflows/build.yml')
+          t=p.read_text(encoding='utf-8')
+          t=t.replace('name: Nova İndir Tam Derleme','name: Nova Video İndir Tam Derleme')
+          t=t.replace('SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip','SOURCE_ZIP: Nova Video İndir 053 Kaynak.zip')
+          t=re.sub(r'EXPECTED_SHA256: [0-9a-f]{64}', 'EXPECTED_SHA256: '+os.environ['SOURCE_HASH'], t)
+          t=t.replace('Nova İndir 0.10.0 Google Play','Nova Video İndir 0.53 Google Play')
+          t=t.replace('Nova İndir 0.10.0 Bağımsız','Nova Video İndir 0.53 Bağımsız')
+          t=t.replace('name: nova-indir-google-play','name: Nova Video İndir 0.53 Google Play')
+          t=t.replace('name: nova-indir-bagimsiz','name: Nova Video İndir 0.53 Bağımsız')
+          marker='      ANDROID_SDK_ROOT: /opt/android-sdk\n'
+          add=('      NOVA_PLAY_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_PLAY.md\n'
+               '      NOVA_INDEPENDENT_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_INDEPENDENT.md\n')
+          if 'NOVA_PLAY_PRIVACY_URL:' not in t:
+              t=t.replace(marker, marker+add, 1)
+          p.write_text(t,encoding='utf-8')
+          PY
+
+          rm -f Nova-Indir-main_Checkpoint-052_Source.zip Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip
+          rm -f .github/workflows/player-safe-test.yml .github/workflows/source-audit.yml
+
+      - name: 053 kaynak commitini dala yaz
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -u
+          git add README.md .github/workflows/build.yml 'Nova Video İndir 053 Kaynak.zip'
+          for DOC in PRIVACY_PLAY.md PRIVACY_INDEPENDENT.md DATA_SAFETY_PLAY.md PLAY_RELEASE_CHECKLIST.md CHECKPOINT_053_REPORT.md; do
+            test -f "$DOC" && git add "$DOC"
+          done
+          git commit -m 'Nova Video İndir 0.53 Checkpoint 053'
+          git push origin HEAD:nova053-build
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Doğrulanmış 053 paketini artifact olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova Video İndir 0.53
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Eski hatalı Release'i sil ve 0.53'ü yayınla
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh release delete nova-player-safe-0.10.0-test1 --cleanup-tag -y || true
+          gh release delete "$RELEASE_TAG" --cleanup-tag -y || true
+          gh release create "$RELEASE_TAG" \
+            'release-assets/Nova Video İndir 0.53 Google Play Lite.aab' \
+            'release-assets/Nova Video İndir 0.53 Google Play Pro.aab' \
+            'release-assets/Nova Video İndir 0.53 Bağımsız Lite.apk' \
+            'release-assets/Nova Video İndir 0.53 Bağımsız Pro.apk' \
+            'release-assets/Nova Video İndir 053 Kaynak.zip' \
+            'release-assets/SHA256SUMS.txt' \
+            --target "$RELEASE_SHA" \
+            --title 'Nova Video İndir 0.53' \
+            --notes 'Checkpoint 053. Google Play Lite/Pro AAB ve Bağımsız Lite/Pro APK. Google Play paketleri API 36, imza, manifest, bundletool, paketli yt-dlp EJS + QuickJS ve ARM64 16 KB doğrulamalarından geçirilmiştir. Bağımsız sürümler ortak Google Play özelliklerinin tamamını ve Bağımsız ek özelliklerini içerir.'
+
+      - name: Geçici imza dosyasını temizle
+        if: always()
+        shell: bash
+        run: rm -f "${NOVA_KEYSTORE:-}" || true

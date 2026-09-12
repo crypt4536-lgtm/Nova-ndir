@@ -9,7 +9,7 @@ on:
       - '.github/workflows/player-safe-test.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: nova-player-safe-test-${{ github.ref }}
@@ -27,6 +27,7 @@ jobs:
       ANDROID_HOME: /opt/android-sdk
       ANDROID_SDK_ROOT: /opt/android-sdk
       GRADLE_OPTS: "-Dfile.encoding=UTF-8"
+      RELEASE_TAG: nova-player-safe-0.10.0-test1
 
     steps:
       - name: Kaynağı al
@@ -53,7 +54,7 @@ jobs:
           chmod +x "$PROJECT_DIR/gradlew"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Player Safe release yamasi
+      - name: Player Safe release yaması
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
@@ -63,12 +64,10 @@ jobs:
 
           build = Path("app/build.gradle.kts")
           text = build.read_text(encoding="utf-8")
-          old_minify = "isMinifyEnabled = true"
-          old_shrink = "isShrinkResources = true"
-          if old_minify not in text or old_shrink not in text:
-              raise SystemExit("Release optimizasyon satirlari bulunamadi")
-          text = text.replace(old_minify, "isMinifyEnabled = false", 1)
-          text = text.replace(old_shrink, "isShrinkResources = false", 1)
+          if "isMinifyEnabled = true" not in text or "isShrinkResources = true" not in text:
+              raise SystemExit("Release optimizasyon satırları bulunamadı")
+          text = text.replace("isMinifyEnabled = true", "isMinifyEnabled = false", 1)
+          text = text.replace("isShrinkResources = true", "isShrinkResources = false", 1)
           build.write_text(text, encoding="utf-8")
 
           props = Path("gradle.properties")
@@ -76,7 +75,6 @@ jobs:
           ptext = ptext.replace("android.r8.optimizedResourceShrinking=true", "android.r8.optimizedResourceShrinking=false")
           props.write_text(ptext, encoding="utf-8")
           PY
-          echo "Release Player Safe ayarlari:"
           grep -nE 'isMinifyEnabled|isShrinkResources' app/build.gradle.kts
           grep -n 'android.r8.optimizedResourceShrinking' gradle.properties || true
 
@@ -146,14 +144,52 @@ jobs:
           ./gradlew clean :app:assembleNovaIndependentRelease \
             --no-daemon --max-workers=1 --stacktrace --console=plain
 
-      - name: Player Safe APK çıktılarını yükle
+      - name: Release dosyalarını hazırla
+        id: assets
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/release-assets"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          LITE="$(find 'Nova İndir 0.10.0 Bağımsız' -maxdepth 1 -type f -name '*Lite*.apk' -print -quit)"
+          PRO="$(find 'Nova İndir 0.10.0 Bağımsız' -maxdepth 1 -type f -name '*Pro*.apk' -print -quit)"
+          test -n "$LITE" && test -n "$PRO"
+          cp "$LITE" "$OUT/Nova-Indir-0.10.0-Player-Safe-Lite.apk"
+          cp "$PRO" "$OUT/Nova-Indir-0.10.0-Player-Safe-Pro.apk"
+          sha256sum "$OUT"/*.apk | tee "$OUT/SHA256SUMS.txt"
+          ls -lh "$OUT"
+
+      - name: Actions artifactını yükle
         uses: actions/upload-artifact@v4
         with:
           name: nova-player-safe-test
-          path: ${{ steps.project.outputs.project_dir }}/Nova İndir 0.10.0 Bağımsız/*.apk
+          path: release-assets/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
+      - name: GitHub Release oluştur ve APK'ları yükle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              release-assets/Nova-Indir-0.10.0-Player-Safe-Lite.apk \
+              release-assets/Nova-Indir-0.10.0-Player-Safe-Pro.apk \
+              release-assets/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              release-assets/Nova-Indir-0.10.0-Player-Safe-Lite.apk \
+              release-assets/Nova-Indir-0.10.0-Player-Safe-Pro.apk \
+              release-assets/SHA256SUMS.txt \
+              --title "Nova İndir 0.10.0 Player Safe Test" \
+              --notes "Nova Player tanılama sürümü. Checkpoint 052 ile aynı uygulama kodu ve release imzası kullanılır; R8 minify, resource shrinking ve optimized resource shrinking bu testte kapalıdır. Dahili oynatıcı regresyonunu izole etmek için hazırlanmıştır."
+          fi
 
       - name: Geçici imza dosyasını temizle
         if: always()

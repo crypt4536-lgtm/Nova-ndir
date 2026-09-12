@@ -336,10 +336,9 @@ jobs:
             apksigner verify --verbose --print-certs "$APK"
           done
 
-      - name: 053 kaynak ve normal build workflow'unu hazırla
+      - name: 053 kaynak ve yayın dosyalarını hazırla
         shell: bash
         env:
-          SOURCE_HASH: ${{ steps.sourcezip.outputs.sha256 }}
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
         run: |
           set -euo pipefail
@@ -362,28 +361,7 @@ jobs:
           EOF
           sed -i 's/^          //' README.md
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re
-          p=Path('.github/workflows/build.yml')
-          t=p.read_text(encoding='utf-8')
-          t=t.replace('name: Nova İndir Tam Derleme','name: Nova Video İndir Tam Derleme')
-          t=t.replace('SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip','SOURCE_ZIP: Nova Video İndir 053 Kaynak.zip')
-          t=re.sub(r'EXPECTED_SHA256: [0-9a-f]{64}', 'EXPECTED_SHA256: '+os.environ['SOURCE_HASH'], t)
-          t=t.replace('Nova İndir 0.10.0 Google Play','Nova Video İndir 0.53 Google Play')
-          t=t.replace('Nova İndir 0.10.0 Bağımsız','Nova Video İndir 0.53 Bağımsız')
-          t=t.replace('name: nova-indir-google-play','name: Nova Video İndir 0.53 Google Play')
-          t=t.replace('name: nova-indir-bagimsiz','name: Nova Video İndir 0.53 Bağımsız')
-          marker='      ANDROID_SDK_ROOT: /opt/android-sdk\n'
-          add=('      NOVA_PLAY_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_PLAY.md\n'
-               '      NOVA_INDEPENDENT_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_INDEPENDENT.md\n')
-          if 'NOVA_PLAY_PRIVACY_URL:' not in t:
-              t=t.replace(marker, marker+add, 1)
-          p.write_text(t,encoding='utf-8')
-          PY
-
           rm -f Nova-Indir-main_Checkpoint-052_Source.zip Nova-Indir-Checkpoint-052-Lite-Pro-Play-Independent-Final.zip
-          rm -f .github/workflows/player-safe-test.yml .github/workflows/source-audit.yml
 
       - name: 053 kaynak commitini dala yaz
         id: commit
@@ -392,11 +370,12 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -u
-          git add README.md .github/workflows/build.yml 'Nova Video İndir 053 Kaynak.zip'
+          git add -u -- ':!/.github/workflows/**'
+          git add README.md 'Nova Video İndir 053 Kaynak.zip'
           for DOC in PRIVACY_PLAY.md PRIVACY_INDEPENDENT.md DATA_SAFETY_PLAY.md PLAY_RELEASE_CHECKLIST.md CHECKPOINT_053_REPORT.md; do
             test -f "$DOC" && git add "$DOC"
           done
+          git diff --cached --name-only | grep -q '^\.github/workflows/' && { echo '::error::Release commitinde workflow dosyası olmamalı'; exit 1; } || true
           git commit -m 'Nova Video İndir 0.53 Checkpoint 053'
           git push origin HEAD:nova053-build
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

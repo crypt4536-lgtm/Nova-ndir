@@ -1,0 +1,161 @@
+name: Nova Player Safe Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/player-safe-test.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nova-player-safe-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-safe:
+    name: Signed Independent Player Safe APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
+      EXPECTED_SHA256: 97aec25ff635f47f0c835f0710589fabb65f43345ba155e1684d3134987abf5e
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      GRADLE_OPTS: "-Dfile.encoding=UTF-8"
+
+    steps:
+      - name: Kaynağı al
+        uses: actions/checkout@v5
+
+      - name: Kaynak ZIP doğrulaması
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_SHA256" || { echo "::error::Kaynak ZIP SHA-256 uyuşmuyor"; exit 1; }
+
+      - name: Kaynağı aç ve projeyi bul
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$GITHUB_WORKSPACE/source"
+          mkdir -p "$GITHUB_WORKSPACE/source"
+          unzip -q "$SOURCE_ZIP" -d "$GITHUB_WORKSPACE/source"
+          GRADLEW="$(find "$GITHUB_WORKSPACE/source" -type f -name gradlew -print -quit)"
+          test -n "$GRADLEW"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+          chmod +x "$PROJECT_DIR/gradlew"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Player Safe release yamasi
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          build = Path("app/build.gradle.kts")
+          text = build.read_text(encoding="utf-8")
+          old_minify = "isMinifyEnabled = true"
+          old_shrink = "isShrinkResources = true"
+          if old_minify not in text or old_shrink not in text:
+              raise SystemExit("Release optimizasyon satirlari bulunamadi")
+          text = text.replace(old_minify, "isMinifyEnabled = false", 1)
+          text = text.replace(old_shrink, "isShrinkResources = false", 1)
+          build.write_text(text, encoding="utf-8")
+
+          props = Path("gradle.properties")
+          ptext = props.read_text(encoding="utf-8")
+          ptext = ptext.replace("android.r8.optimizedResourceShrinking=true", "android.r8.optimizedResourceShrinking=false")
+          props.write_text(ptext, encoding="utf-8")
+          PY
+          echo "Release Player Safe ayarlari:"
+          grep -nE 'isMinifyEnabled|isShrinkResources' app/build.gradle.kts
+          grep -n 'android.r8.optimizedResourceShrinking' gradle.properties || true
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK araçlarını kur
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          if [ ! -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            curl -fsSL -o "$RUNNER_TEMP/commandlinetools.zip" https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+            rm -rf "$SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            mkdir -p "$SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            unzip -q "$RUNNER_TEMP/commandlinetools.zip" -d "$RUNNER_TEMP/android-cmdline-tools"
+            mv "$RUNNER_TEMP/android-cmdline-tools/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/"
+          fi
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36"
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Release imzasını hazırla
+        shell: bash
+        env:
+          NOVA_KEYSTORE_B64: ${{ secrets.NOVA_KEYSTORE_B64 }}
+          NOVA_KEY_ALIAS: ${{ secrets.NOVA_KEY_ALIAS }}
+          NOVA_STORE_PASSWORD: ${{ secrets.NOVA_STORE_PASSWORD }}
+          NOVA_KEY_PASSWORD: ${{ secrets.NOVA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${NOVA_KEYSTORE_B64:-}"
+          test -n "${NOVA_KEY_ALIAS:-}"
+          test -n "${NOVA_STORE_PASSWORD:-}"
+          test -n "${NOVA_KEY_PASSWORD:-}"
+          umask 077
+          KEYSTORE_PATH="$RUNNER_TEMP/nova-release.keystore"
+          printf '%s' "$NOVA_KEYSTORE_B64" | base64 --decode > "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" -alias "$NOVA_KEY_ALIAS" >/dev/null
+          {
+            echo "NOVA_KEYSTORE=$KEYSTORE_PATH"
+            echo "NOVA_KEY_ALIAS=$NOVA_KEY_ALIAS"
+            echo "NOVA_STORE_PASSWORD=$NOVA_STORE_PASSWORD"
+            echo "NOVA_KEY_PASSWORD=$NOVA_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Room schema dosyalarını temizle
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          if [ -d app/schemas ]; then find app/schemas -type f -name '*.json' -delete; fi
+
+      - name: Player Safe Bağımsız Lite ve Pro derle
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew clean :app:assembleNovaIndependentRelease \
+            --no-daemon --max-workers=1 --stacktrace --console=plain
+
+      - name: Player Safe APK çıktılarını yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-player-safe-test
+          path: ${{ steps.project.outputs.project_dir }}/Nova İndir 0.10.0 Bağımsız/*.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Geçici imza dosyasını temizle
+        if: always()
+        shell: bash
+        run: rm -f "${NOVA_KEYSTORE:-}" || true

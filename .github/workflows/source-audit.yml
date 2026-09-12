@@ -1,0 +1,71 @@
+name: Nova 052 Kaynak Denetimi
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/source-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit-source:
+    name: 052 tam kaynak ve varyant denetimi
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SOURCE_ZIP: Nova-Indir-main_Checkpoint-052_Source.zip
+      EXPECTED_SHA256: 97aec25ff635f47f0c835f0710589fabb65f43345ba155e1684d3134987abf5e
+
+    steps:
+      - name: Repoyu al
+        uses: actions/checkout@v5
+
+      - name: Kaynağı doğrula ve aç
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_SHA256" || { echo "::error::Kaynak ZIP SHA-256 uyuşmuyor"; exit 1; }
+          rm -rf audit
+          mkdir -p audit/source audit/report
+          unzip -q "$SOURCE_ZIP" -d audit/source
+          GRADLEW="$(find audit/source -type f -name gradlew -print -quit)"
+          test -n "$GRADLEW"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+          echo "$PROJECT_DIR" > audit/report/project-dir.txt
+          find "$PROJECT_DIR" -type f | sort > audit/report/all-files.txt
+
+      - name: Play ve Independent kaynak farklarını raporla
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR="$(cat audit/report/project-dir.txt)"
+          {
+            echo '=== SOURCE SET DIRECTORIES ==='
+            find "$PROJECT_DIR/app/src" -maxdepth 3 -type d | sort
+            echo
+            echo '=== BUILD CONFIG / FLAVORS / FEATURES ==='
+            grep -RInE 'productFlavors|flavorDimensions|novaPlay|novaIndependent|lite|pro|applicationId|versionName|versionCode|minSdk|targetSdk|compileSdk|isMinifyEnabled|isShrinkResources|proguard|consumerProguard|buildConfigField|manifestPlaceholders|packaging|jniLibs|androidResources|bundle|abi|splits|media3|yt.?dlp|chaquopy|python|ffmpeg|PetOverlay|REQUEST_INSTALL_PACKAGES|MANAGE_EXTERNAL_STORAGE|QUERY_ALL_PACKAGES' \
+              "$PROJECT_DIR/app" "$PROJECT_DIR/gradle" "$PROJECT_DIR/gradle.properties" "$PROJECT_DIR/settings.gradle.kts" 2>/dev/null || true
+            echo
+            echo '=== MANIFESTS ==='
+            find "$PROJECT_DIR/app/src" -type f -name 'AndroidManifest.xml' -print -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+            echo
+            echo '=== PLAY / INDEPENDENT CONDITIONAL CODE ==='
+            grep -RInE 'BuildConfig\.|NOVA_|PLAY|INDEPENDENT|novaPlay|novaIndependent|IS_PLAY|IS_INDEPENDENT|DISTRIBUTION|FLAVOR|BuildConfig\.FLAVOR|BuildConfig\.EDITION' \
+              "$PROJECT_DIR/app/src" 2>/dev/null || true
+          } > audit/report/source-audit.txt
+
+      - name: Tam kaynağı artifact olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-052-full-source-audit
+          path: audit/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6

@@ -2,13 +2,18 @@ name: Nova Player Kaynak Tanılama
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/player-diagnostic.yml'
 
 permissions:
   contents: read
 
 jobs:
-  player-source:
-    name: Nova Player kaynaklarını çıkar
+  player-chain:
+    name: Nova Player URI zincirini çıkar
     runs-on: ubuntu-latest
 
     steps:
@@ -27,107 +32,114 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf playerdiag
-          mkdir -p playerdiag/source playerdiag/output
+          mkdir -p playerdiag/source playerdiag/output/files
           unzip -q "Nova-Indir-main_Checkpoint-052_Source.zip" -d playerdiag/source
 
-      - name: Nova Player kaynaklarını bul ve kopyala
+      - name: Player URI zincirini tara
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import hashlib
           import re
           import shutil
 
           root = Path("playerdiag/source")
           out = Path("playerdiag/output")
           files_out = out / "files"
-          files_out.mkdir(parents=True, exist_ok=True)
 
-          extensions = {".kt", ".kts", ".java", ".xml", ".toml", ".properties", ".pro"}
-          patterns = [
-              r"\bMediaItem\b",
-              r"\bExoPlayer\b",
-              r"\bPlayerView\b",
-              r"\bPlaybackException\b",
-              r"\bPlayer\.Listener\b",
-              r"setMediaItem",
-              r"setMimeType",
-              r"MediaItem\.fromUri",
-              r"contentResolver",
-              r"openFileDescriptor",
-              r"Nova Player",
-              r"internal playback",
-              r"Playback source",
-          ]
-          rx = re.compile("|".join(patterns), re.IGNORECASE)
-          name_rx = re.compile(r"(player|video|playback|media)", re.IGNORECASE)
+          wanted_names = {
+              "PlayerActivity.kt",
+              "MainActivity.kt",
+              "GalleryActivity.kt",
+              "GalleryAdapter.kt",
+              "DownloadAdapter.kt",
+              "HistoryStore.kt",
+              "StoredDownload.kt",
+              "StorageHelper.kt",
+              "DownloadRepository.kt",
+              "CompletionEventStore.kt",
+              "DownloadService.kt",
+              "YtDlpDownloadService.kt",
+              "AndroidManifest.xml",
+              "build.gradle.kts",
+              "proguard-rules.pro",
+              "gradle.properties",
+          }
 
-          matched = {}
-          scanned = 0
-
+          copied = []
           for path in root.rglob("*"):
-              if not path.is_file() or path.suffix.lower() not in extensions:
+              if not path.is_file() or path.name not in wanted_names:
                   continue
-              scanned += 1
-              try:
-                  text = path.read_text(encoding="utf-8", errors="replace")
-              except Exception:
-                  continue
-
-              reasons = []
-              if rx.search(text):
-                  reasons.append("content")
-              if name_rx.search(path.name):
-                  reasons.append("filename")
-              if not reasons:
-                  continue
-
               rel = path.relative_to(root)
-              matched[rel] = (path, reasons, text)
               target = files_out / rel
               target.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(path, target)
+              copied.append(rel)
+
+          patterns = [
+              r"PlayerActivity",
+              r"EXTRA_OUTPUT_URI",
+              r"outputUri",
+              r"HistoryStore",
+              r"StoredDownload",
+              r"StorageHelper",
+              r"renameOutput",
+              r"renameDownloaded",
+              r"MediaStore",
+              r"ACTION_VIEW",
+              r"startActivity",
+              r"openExternal",
+              r"openFileDescriptor",
+              r"MediaItem\.fromUri",
+              r"setMediaItem",
+          ]
+          rx = re.compile("|".join(patterns), re.IGNORECASE)
+          text_ext = {".kt", ".kts", ".java", ".xml", ".pro", ".properties"}
+
+          hits = []
+          for path in root.rglob("*"):
+              if not path.is_file() or path.suffix.lower() not in text_ext:
+                  continue
+              try:
+                  lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+              except Exception:
+                  continue
+              rel = path.relative_to(root)
+              for lineno, line in enumerate(lines, start=1):
+                  if rx.search(line):
+                      hits.append((str(rel), lineno, line.strip()))
 
           report = []
-          report.append("Nova Player Checkpoint 052 Source Diagnostic")
-          report.append("============================================")
-          report.append(f"Scanned text/code files: {scanned}")
-          report.append(f"Matched files: {len(matched)}")
+          report.append("Nova Player Checkpoint 052 URI Chain Diagnostic")
+          report.append("================================================")
+          report.append(f"Selected full files copied: {len(copied)}")
+          report.append(f"Chain matches: {len(hits)}")
           report.append("")
+          report.append("FULL FILES")
+          report.append("----------")
+          report.extend(str(p) for p in sorted(copied, key=lambda p: str(p).lower()))
+          report.append("")
+          report.append("CHAIN MATCHES")
+          report.append("-------------")
+          for rel, lineno, line in hits:
+              report.append(f"{rel}:{lineno}: {line[:800]}")
 
-          for rel in sorted(matched, key=lambda p: str(p).lower()):
-              path, reasons, text = matched[rel]
-              digest = hashlib.sha256(path.read_bytes()).hexdigest()
-              report.append(f"FILE: {rel}")
-              report.append(f"MATCH: {', '.join(reasons)}")
-              report.append(f"SHA256: {digest}")
-              lines = text.splitlines()
-              hit_lines = []
-              for i, line in enumerate(lines, start=1):
-                  if rx.search(line):
-                      hit_lines.append((i, line.strip()))
-              for i, line in hit_lines[:80]:
-                  report.append(f"  L{i}: {line[:500]}")
-              if len(hit_lines) > 80:
-                  report.append(f"  ... {len(hit_lines) - 80} more matching lines")
-              report.append("")
+          text = "\n".join(report)
+          (out / "NovaPlayerUriChain.txt").write_text(text, encoding="utf-8")
+          print(text)
 
-          (out / "NovaPlayerDiagnostic.txt").write_text("\n".join(report), encoding="utf-8")
-
-          all_paths = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
-          (out / "SourceFileList.txt").write_text("\n".join(all_paths), encoding="utf-8")
-
-          print("\n".join(report))
-          if not matched:
-              raise SystemExit("Nova Player ile ilgili kaynak bulunamadı")
+          required = {"PlayerActivity.kt", "HistoryStore.kt", "StorageHelper.kt"}
+          found = {Path(p).name for p in copied}
+          missing = sorted(required - found)
+          if missing:
+              raise SystemExit("Eksik kritik kaynaklar: " + ", ".join(missing))
           PY
 
-      - name: Tanılama çıktısını yükle
+      - name: URI zinciri tanılama çıktısını yükle
         uses: actions/upload-artifact@v4
         with:
-          name: nova-player-source
+          name: nova-player-uri-chain
           path: playerdiag/output/
           if-no-files-found: error
           retention-days: 7

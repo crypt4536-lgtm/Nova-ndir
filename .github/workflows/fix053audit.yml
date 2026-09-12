@@ -1,0 +1,155 @@
+name: 053 DEX Denetim Düzeltmesi
+
+on:
+  push:
+    branches:
+      - nova053-build
+    paths:
+      - '.github/workflows/fix053audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: nova053-build
+          fetch-depth: 0
+
+      - name: Ham DEX metin aramasını gerçek class_defs denetimiyle değiştir
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('.github/workflows/release053.yml')
+          t = p.read_text(encoding='utf-8')
+
+          pattern = re.compile(
+              r"      - name: Play sınıf ayrımı ve Bağımsız özellik tamlığı\n"
+              r".*?"
+              r"          PY\n\n"
+              r"(?=      - name: Bağımsız APK imzalarını doğrula)",
+              re.S,
+          )
+
+          replacement = r'''      - name: Play sınıf ayrımı ve Bağımsız özellik tamlığı
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, struct, zipfile
+          from pathlib import Path
+
+          play_forbidden = ['PetOverlayService', 'ApkDownloaderActivity', 'UpdateCenterActivity', 'ApkTranslationActivity']
+          play_required = ['PlayerActivity', 'BrowserActivity', 'GalleryActivity', 'AccountManagerActivity', 'YtDlpDownloadService']
+          independent_extra = ['PetOverlayService', 'ApkDownloaderActivity', 'UpdateCenterActivity', 'ApkTranslationActivity']
+
+          def u32(buf, off):
+              return struct.unpack_from('<I', buf, off)[0]
+
+          def read_uleb128(buf, off):
+              value = 0
+              shift = 0
+              for _ in range(5):
+                  b = buf[off]
+                  off += 1
+                  value |= (b & 0x7f) << shift
+                  if not (b & 0x80):
+                      return value, off
+                  shift += 7
+              raise ValueError('Geçersiz ULEB128')
+
+          def read_dex_string(buf, off):
+              _, p = read_uleb128(buf, off)
+              end = buf.index(0, p)
+              return buf[p:end].decode('utf-8', errors='replace')
+
+          def defined_descriptors(buf):
+              if len(buf) < 0x70 or not buf.startswith(b'dex\n'):
+                  raise ValueError('Geçersiz DEX')
+              string_ids_size = u32(buf, 0x38)
+              string_ids_off = u32(buf, 0x3c)
+              type_ids_size = u32(buf, 0x40)
+              type_ids_off = u32(buf, 0x44)
+              class_defs_size = u32(buf, 0x60)
+              class_defs_off = u32(buf, 0x64)
+
+              strings = []
+              for i in range(string_ids_size):
+                  string_data_off = u32(buf, string_ids_off + i * 4)
+                  strings.append(read_dex_string(buf, string_data_off))
+
+              type_desc = []
+              for i in range(type_ids_size):
+                  descriptor_idx = u32(buf, type_ids_off + i * 4)
+                  type_desc.append(strings[descriptor_idx])
+
+              result = set()
+              for i in range(class_defs_size):
+                  class_idx = u32(buf, class_defs_off + i * 32)
+                  result.add(type_desc[class_idx])
+              return result
+
+          def defined_simple_names(path):
+              result = set()
+              with zipfile.ZipFile(path) as z:
+                  dex_names = [n for n in z.namelist() if re.search(r'(?:^|/)classes\d*\.dex$', n)]
+                  assert dex_names, f'DEX bulunamadı: {path}'
+                  for dex_name in dex_names:
+                      for desc in defined_descriptors(z.read(dex_name)):
+                          if desc.startswith('L') and desc.endswith(';'):
+                              simple = desc.rsplit('/', 1)[-1][:-1]
+                              result.add(simple)
+              return result
+
+          play_files = [
+              Path('release-assets/Nova Video İndir 0.53 Google Play Lite.aab'),
+              Path('release-assets/Nova Video İndir 0.53 Google Play Pro.aab'),
+          ]
+          independent_files = [
+              Path('release-assets/Nova Video İndir 0.53 Bağımsız Lite.apk'),
+              Path('release-assets/Nova Video İndir 0.53 Bağımsız Pro.apk'),
+          ]
+
+          for aab in play_files:
+              classes = defined_simple_names(aab)
+              for s in play_required:
+                  assert s in classes, f'Play ortak özellik eksik: {s}'
+              for s in play_forbidden:
+                  assert s not in classes, f'Play paketine Bağımsız sınıf sızdı: {s}'
+
+          for apk in independent_files:
+              classes = defined_simple_names(apk)
+              for s in play_required + independent_extra:
+                  assert s in classes, f'Bağımsız özellik eksik: {s}'
+
+          print('Play/Bağımsız gerçek DEX class_defs matrisi: PASS')
+          PY
+
+'''
+
+          new, count = pattern.subn(replacement, t, count=1)
+          if count != 1:
+              raise SystemExit(f'Beklenen denetim bloğu bulunamadı/değiştirilemedi: {count}')
+          p.write_text(new, encoding='utf-8')
+          PY
+
+          git diff --check
+          git diff -- .github/workflows/release053.yml
+
+      - name: Düzeltmeyi dala yaz
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/release053.yml
+          git commit -m 'Fix 053 DEX class isolation validation'
+          git push origin HEAD:nova053-build

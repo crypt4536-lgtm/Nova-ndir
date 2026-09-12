@@ -238,26 +238,92 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import re, zipfile
+          import re, struct, zipfile
           from pathlib import Path
 
-          play_forbidden=[b'PetOverlayService',b'ApkDownloaderActivity',b'UpdateCenterActivity',b'ApkTranslationActivity']
-          play_required=[b'PlayerActivity',b'BrowserActivity',b'GalleryActivity',b'AccountManagerActivity',b'YtDlpDownloadService']
-          independent_extra=[b'PetOverlayService',b'ApkDownloaderActivity',b'UpdateCenterActivity',b'ApkTranslationActivity']
+          play_forbidden = ['PetOverlayService', 'ApkDownloaderActivity', 'UpdateCenterActivity', 'ApkTranslationActivity']
+          play_required = ['PlayerActivity', 'BrowserActivity', 'GalleryActivity', 'AccountManagerActivity', 'YtDlpDownloadService']
+          independent_extra = ['PetOverlayService', 'ApkDownloaderActivity', 'UpdateCenterActivity', 'ApkTranslationActivity']
 
-          def dex_blob(path):
+          def u32(buf, off):
+              return struct.unpack_from('<I', buf, off)[0]
+
+          def read_uleb128(buf, off):
+              value = 0
+              shift = 0
+              for _ in range(5):
+                  b = buf[off]
+                  off += 1
+                  value |= (b & 0x7f) << shift
+                  if not (b & 0x80):
+                      return value, off
+                  shift += 7
+              raise ValueError('Geçersiz ULEB128')
+
+          def read_dex_string(buf, off):
+              _, pos = read_uleb128(buf, off)
+              end = buf.index(0, pos)
+              return buf[pos:end].decode('utf-8', errors='replace')
+
+          def defined_descriptors(buf):
+              if len(buf) < 0x70 or not buf.startswith(b'dex\n'):
+                  raise ValueError('Geçersiz DEX')
+              string_ids_size = u32(buf, 0x38)
+              string_ids_off = u32(buf, 0x3c)
+              type_ids_size = u32(buf, 0x40)
+              type_ids_off = u32(buf, 0x44)
+              class_defs_size = u32(buf, 0x60)
+              class_defs_off = u32(buf, 0x64)
+
+              strings = []
+              for i in range(string_ids_size):
+                  string_data_off = u32(buf, string_ids_off + i * 4)
+                  strings.append(read_dex_string(buf, string_data_off))
+
+              type_desc = []
+              for i in range(type_ids_size):
+                  descriptor_idx = u32(buf, type_ids_off + i * 4)
+                  type_desc.append(strings[descriptor_idx])
+
+              result = set()
+              for i in range(class_defs_size):
+                  class_idx = u32(buf, class_defs_off + i * 32)
+                  result.add(type_desc[class_idx])
+              return result
+
+          def defined_simple_names(path):
+              result = set()
               with zipfile.ZipFile(path) as z:
-                  return b'\n'.join(z.read(n) for n in z.namelist() if re.search(r'(?:^|/)classes\d*\.dex$', n))
+                  dex_names = [n for n in z.namelist() if re.search(r'(?:^|/)classes\d*\.dex$', n)]
+                  assert dex_names, f'DEX bulunamadı: {path}'
+                  for dex_name in dex_names:
+                      for desc in defined_descriptors(z.read(dex_name)):
+                          if desc.startswith('L') and desc.endswith(';'):
+                              result.add(desc.rsplit('/', 1)[-1][:-1])
+              return result
 
-          for aab in [Path('release-assets/Nova Video İndir 0.53 Google Play Lite.aab'),Path('release-assets/Nova Video İndir 0.53 Google Play Pro.aab')]:
-              blob=dex_blob(aab)
-              for s in play_required: assert s in blob, f'Play ortak özellik eksik: {s.decode()}'
-              for s in play_forbidden: assert s not in blob, f'Play paketine Bağımsız sınıf sızdı: {s.decode()}'
+          play_files = [
+              Path('release-assets/Nova Video İndir 0.53 Google Play Lite.aab'),
+              Path('release-assets/Nova Video İndir 0.53 Google Play Pro.aab'),
+          ]
+          independent_files = [
+              Path('release-assets/Nova Video İndir 0.53 Bağımsız Lite.apk'),
+              Path('release-assets/Nova Video İndir 0.53 Bağımsız Pro.apk'),
+          ]
 
-          for apk in [Path('release-assets/Nova Video İndir 0.53 Bağımsız Lite.apk'),Path('release-assets/Nova Video İndir 0.53 Bağımsız Pro.apk')]:
-              blob=dex_blob(apk)
-              for s in play_required + independent_extra: assert s in blob, f'Bağımsız özellik eksik: {s.decode()}'
-          print('Play/Bağımsız özellik matrisi: PASS')
+          for aab in play_files:
+              classes = defined_simple_names(aab)
+              for name in play_required:
+                  assert name in classes, f'Play ortak özellik eksik: {name}'
+              for name in play_forbidden:
+                  assert name not in classes, f'Play paketine Bağımsız sınıf sızdı: {name}'
+
+          for apk in independent_files:
+              classes = defined_simple_names(apk)
+              for name in play_required + independent_extra:
+                  assert name in classes, f'Bağımsız özellik eksik: {name}'
+
+          print('Play/Bağımsız gerçek DEX class_defs matrisi: PASS')
           PY
 
       - name: Bağımsız APK imzalarını doğrula

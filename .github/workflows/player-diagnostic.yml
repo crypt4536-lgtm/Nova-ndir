@@ -1,0 +1,134 @@
+name: Nova Player Kaynak Tanılama
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  player-source:
+    name: Nova Player kaynaklarını çıkar
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repoyu al
+        uses: actions/checkout@v4
+
+      - name: Checkpoint 052 kaynak ZIP'ini doğrula
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "Nova-Indir-main_Checkpoint-052_Source.zip"
+          sha256sum "Nova-Indir-main_Checkpoint-052_Source.zip"
+
+      - name: Kaynak ZIP'ini aç
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf playerdiag
+          mkdir -p playerdiag/source playerdiag/output
+          unzip -q "Nova-Indir-main_Checkpoint-052_Source.zip" -d playerdiag/source
+
+      - name: Nova Player kaynaklarını bul ve kopyala
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import re
+          import shutil
+
+          root = Path("playerdiag/source")
+          out = Path("playerdiag/output")
+          files_out = out / "files"
+          files_out.mkdir(parents=True, exist_ok=True)
+
+          extensions = {".kt", ".kts", ".java", ".xml", ".toml", ".properties", ".pro"}
+          patterns = [
+              r"\bMediaItem\b",
+              r"\bExoPlayer\b",
+              r"\bPlayerView\b",
+              r"\bPlaybackException\b",
+              r"\bPlayer\.Listener\b",
+              r"setMediaItem",
+              r"setMimeType",
+              r"MediaItem\.fromUri",
+              r"contentResolver",
+              r"openFileDescriptor",
+              r"Nova Player",
+              r"internal playback",
+              r"Playback source",
+          ]
+          rx = re.compile("|".join(patterns), re.IGNORECASE)
+          name_rx = re.compile(r"(player|video|playback|media)", re.IGNORECASE)
+
+          matched = {}
+          scanned = 0
+
+          for path in root.rglob("*"):
+              if not path.is_file() or path.suffix.lower() not in extensions:
+                  continue
+              scanned += 1
+              try:
+                  text = path.read_text(encoding="utf-8", errors="replace")
+              except Exception:
+                  continue
+
+              reasons = []
+              if rx.search(text):
+                  reasons.append("content")
+              if name_rx.search(path.name):
+                  reasons.append("filename")
+              if not reasons:
+                  continue
+
+              rel = path.relative_to(root)
+              matched[rel] = (path, reasons, text)
+              target = files_out / rel
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(path, target)
+
+          report = []
+          report.append("Nova Player Checkpoint 052 Source Diagnostic")
+          report.append("============================================")
+          report.append(f"Scanned text/code files: {scanned}")
+          report.append(f"Matched files: {len(matched)}")
+          report.append("")
+
+          for rel in sorted(matched, key=lambda p: str(p).lower()):
+              path, reasons, text = matched[rel]
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              report.append(f"FILE: {rel}")
+              report.append(f"MATCH: {', '.join(reasons)}")
+              report.append(f"SHA256: {digest}")
+              lines = text.splitlines()
+              hit_lines = []
+              for i, line in enumerate(lines, start=1):
+                  if rx.search(line):
+                      hit_lines.append((i, line.strip()))
+              for i, line in hit_lines[:80]:
+                  report.append(f"  L{i}: {line[:500]}")
+              if len(hit_lines) > 80:
+                  report.append(f"  ... {len(hit_lines) - 80} more matching lines")
+              report.append("")
+
+          (out / "NovaPlayerDiagnostic.txt").write_text("\n".join(report), encoding="utf-8")
+
+          all_paths = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+          (out / "SourceFileList.txt").write_text("\n".join(all_paths), encoding="utf-8")
+
+          print("\n".join(report))
+          if not matched:
+              raise SystemExit("Nova Player ile ilgili kaynak bulunamadı")
+          PY
+
+      - name: Tanılama çıktısını yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-player-source
+          path: playerdiag/output/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6

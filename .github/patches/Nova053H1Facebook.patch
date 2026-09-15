@@ -1,0 +1,88 @@
+--- a/app/src/main/java/com/nova/downloader/data/YtDlpMediaResolver.kt
++++ b/app/src/main/java/com/nova/downloader/data/YtDlpMediaResolver.kt
+@@ -23,19 +23,21 @@
+         return try {
+             YoutubeDL.getInstance().init(appContext)
+             val stableNote = ensureStableExtractor()
+-            var candidates = listOf(sourceUrl)
+             var resolutionNote = ""
+-            var attempt = tryCandidates(sourceUrl, candidates)
+-            if (attempt is Attempt.Ready) return Result.Ready(attempt.download)
+-
+-            if (FacebookUrlExtractor.isShareAlias(sourceUrl)) {
++            val candidates = if (FacebookUrlExtractor.isShareAlias(sourceUrl)) {
+                 val resolution = facebookPageResolver.resolve(sourceUrl)
+-                candidates = resolution.candidates
+                 resolutionNote = resolution.note
+-                attempt = tryCandidates(sourceUrl, candidates)
+-                if (attempt is Attempt.Ready) return Result.Ready(attempt.download)
++                resolution.candidates
++                    .filter(FacebookUrlExtractor::isYtDlpCandidate)
++                    .sortedWith(compareBy<String> { it == sourceUrl }.thenByDescending { FacebookUrlExtractor.extractNumericVideoId(it) != null })
++                    .ifEmpty { listOf(sourceUrl) }
++            } else {
++                listOf(sourceUrl)
+             }
+ 
++            var attempt = tryCandidates(sourceUrl, candidates)
++            if (attempt is Attempt.Ready) return Result.Ready(attempt.download)
++
+             val first = attempt as Attempt.Failed
+             if (!BuildConfig.PLAY_STORE_BUILD && shouldRetryWithNightly(first.rawMessage)) {
+                 val nightly = ensureNightlyExtractor()
+@@ -146,9 +148,9 @@
+     private fun humanMessage(raw: String?, notes: List<String>): String {
+         val message = raw.orEmpty()
+         val friendly = when {
++            message.contains("unsupported url", true) -> AppText.get(R.string.media_info_unresolved)
+             YtDlpFallbackPolicy.isHardAccessGate(message) -> AppText.get(R.string.content_unavailable_account)
+-            message.contains("login", true) || message.contains("cookie", true) || message.contains("not a bot", true) ->
+-                AppText.get(R.string.content_login_required)
++            isExplicitAuthenticationFailure(message) -> AppText.get(R.string.content_login_required)
+             message.contains("private", true) || message.contains("not available", true) ->
+                 AppText.get(R.string.content_unavailable_account)
+             message.contains("rate", true) || message.contains("429") -> AppText.get(R.string.platform_rate_limited)
+@@ -165,6 +167,20 @@
+         }
+     }
+ 
++    private fun isExplicitAuthenticationFailure(raw: String): Boolean {
++        if (raw.contains("unsupported url", true)) return false
++        return listOf(
++            "login required",
++            "log in to",
++            "sign in to",
++            "not a bot",
++            "authentication required",
++            "cookies are required",
++            "cookies required",
++            "session required"
++        ).any { raw.contains(it, true) }
++    }
++
+     private fun compact(value: String?) = value.orEmpty().replace(Regex("\\s+"), " ").trim().take(240)
+ 
+     private fun compactTechnicalError(raw: String): String = compact(
+--- a/app/src/main/java/com/nova/downloader/core/FacebookUrlExtractor.kt
++++ b/app/src/main/java/com/nova/downloader/core/FacebookUrlExtractor.kt
+@@ -97,12 +97,19 @@
+             output += "https://www.facebook.com/video.php?v=$id"
+             output += "https://www.facebook.com/watch/?v=$id"
+             output += "https://m.facebook.com/watch/?v=$id&_rdr"
+-            output += "facebook:$id"
+         }
+ 
+         return output.toList()
+     }
+ 
++    fun isYtDlpCandidate(url: String): Boolean {
++        if (!url.startsWith("https://", ignoreCase = true) || !isFacebookUrl(url)) return false
++        val uri = runCatching { URI(url) }.getOrNull() ?: return false
++        val path = uri.path.orEmpty().lowercase()
++        if (path.startsWith("/login") || path.startsWith("/checkpoint") || path.startsWith("/recover")) return false
++        return isShareAlias(url) || supportedPathRegex.containsMatchIn(url) || extractNumericVideoId(url) != null
++    }
++
+     fun extractNumericVideoId(url: String): String? {
+         return videoIdPatterns.firstNotNullOfOrNull { pattern ->
+             pattern.find(url)?.groupValues?.getOrNull(1)

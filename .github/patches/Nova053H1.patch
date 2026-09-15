@@ -1,0 +1,140 @@
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -12,8 +12,8 @@
+ }
+ 
+ // Release identity: update these three values together for every checkpoint.
+-val novaVersionName = "0.53"
+-val novaVersionCode = 55
++val novaVersionName = "0.53.1"
++val novaVersionCode = 56
+ val novaCheckpoint = "053"
+ val novaArtifactVersion = novaVersionName.substringBefore("-")
+ val novaArtifactBaseName = "Nova Video İndir $novaArtifactVersion"
+@@ -118,12 +118,16 @@
+         create("pro") {
+             dimension = "edition"
+             applicationIdSuffix = ".pro"
++            buildConfigField("boolean", "IS_PRO_EDITION", "true")
+             buildConfigField("boolean", "HAS_FFMPEG", "true")
+         }
+         create("lite") {
+             dimension = "edition"
+             applicationIdSuffix = ".lite"
+-            buildConfigField("boolean", "HAS_FFMPEG", "false")
++            buildConfigField("boolean", "IS_PRO_EDITION", "false")
++            // FFmpeg is a baseline download dependency: many sites deliver video/audio separately
++            // or require a final remux even when a combined format was requested.
++            buildConfigField("boolean", "HAS_FFMPEG", "true")
+         }
+     }
+ 
+@@ -208,7 +212,7 @@
+ 
+ dependencies {
+         implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
+-    add("proImplementation", "io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
++    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
+     implementation("androidx.core:core:1.17.0")
+     implementation("androidx.room:room-runtime:2.8.4")
+     implementation("androidx.room:room-ktx:2.8.4")
+--- a/app/src/independent/java/com/nova/downloader/update/SecureUpdateManager.kt
++++ b/app/src/independent/java/com/nova/downloader/update/SecureUpdateManager.kt
+@@ -97,9 +97,9 @@
+     }
+ 
+     companion object {
+-        fun expectedEngineFlavor(): String = if (BuildConfig.HAS_FFMPEG) "full" else "lite"
++        fun expectedEngineFlavor(): String = if (BuildConfig.IS_PRO_EDITION) "full" else "lite"
+ 
+-        fun configuredManifestUrl(): String = if (BuildConfig.HAS_FFMPEG) {
++        fun configuredManifestUrl(): String = if (BuildConfig.IS_PRO_EDITION) {
+             BuildConfig.NOVA_UPDATE_MANIFEST_URL_FULL
+         } else {
+             BuildConfig.NOVA_UPDATE_MANIFEST_URL_LITE
+--- a/app/src/main/java/com/nova/downloader/service/YtDlpDownloadService.kt
++++ b/app/src/main/java/com/nova/downloader/service/YtDlpDownloadService.kt
+@@ -108,7 +108,7 @@
+         var auth: YtDlpRequestConfigurator.AuthMaterial? = null
+         try {
+             YoutubeDL.getInstance().init(applicationContext)
+-            if (requiresFfmpeg(task)) FfmpegRuntime.initialize(applicationContext)
++            if (BuildConfig.HAS_FFMPEG) FfmpegRuntime.initialize(applicationContext)
+             LocalLog.info("Download", "yt-dlp task started id=${task.id}")
+             history.update(task.id) {
+                 it.copy(
+@@ -267,12 +267,13 @@
+             val wasPaused = task.id in paused
+             val wasCancelled = task.id in cancelled
+             if (wasCancelled) runCatching { jobDir.deleteRecursively() }
++            val resumableFailure = !wasCancelled && isResumableFailure(error.message)
+             history.update(task.id) {
+                 it.copy(
+                     status = when { wasCancelled -> DownloadState.CANCELLED; wasPaused -> DownloadState.PAUSED; else -> DownloadState.FAILED },
+                     bytesDownloaded = if (wasCancelled) 0L else size,
+                     partialFilePath = if (wasCancelled) null else jobDir.absolutePath,
+-                    resumeSupported = !wasCancelled,
++                    resumeSupported = resumableFailure,
+                     errorMessage = if (wasCancelled) AppText.get(R.string.download_cancelled_message) else friendlyError(error.message)
+                 )
+             }
+@@ -430,6 +431,15 @@
+             ?: "application/octet-stream"
+     }
+ 
++    private fun isResumableFailure(raw: String?): Boolean {
++        val message = raw.orEmpty()
++        if (message.contains("ffmpeg not found", true)) return false
++        if (message.contains("Postprocessing", true)) return false
++        if (message.contains("post-processing", true)) return false
++        if (message.contains("No such file or directory", true) && message.contains("ffmpeg", true)) return false
++        return true
++    }
++
+     private fun friendlyError(raw: String?): String {
+         val message = raw.orEmpty().replace(Regex("https?://\\S+"), AppText.get(R.string.redacted_address)).take(900)
+         return when {
+--- a/app/src/main/java/com/nova/downloader/ui/MainActivity.kt
++++ b/app/src/main/java/com/nova/downloader/ui/MainActivity.kt
+@@ -308,7 +308,7 @@
+                 BuildConfig.VERSION_CODE,
+                 BuildConfig.NOVA_CHECKPOINT,
+                 getString(if (BuildConfig.PLAY_STORE_BUILD) R.string.distribution_google_play else R.string.distribution_independent),
+-                getString(if (BuildConfig.HAS_FFMPEG) R.string.edition_pro else R.string.edition_lite)
++                getString(if (BuildConfig.IS_PRO_EDITION) R.string.edition_pro else R.string.edition_lite)
+             )
+             textSize = 10.5f
+             setTextColor(Color.WHITE)
+--- a/app/src/main/java/com/nova/downloader/ui/SettingsActivity.kt
++++ b/app/src/main/java/com/nova/downloader/ui/SettingsActivity.kt
+@@ -472,7 +472,7 @@
+         if (::summaryText.isInitialized) summaryText.text = getString(
+             R.string.settings_summary,
+             if (YtDlpPluginVault.hasPlugins(this)) getString(R.string.loaded) else getString(R.string.none),
+-            if (BuildConfig.HAS_FFMPEG) getString(R.string.engine_flavor_full) else getString(R.string.engine_flavor_lite)
++            if (BuildConfig.IS_PRO_EDITION) getString(R.string.engine_flavor_full) else getString(R.string.engine_flavor_lite)
+         )
+     }
+ 
+--- a/tools/check_checkpoint_038.py
++++ b/tools/check_checkpoint_038.py
+@@ -77,7 +77,7 @@
+ # Independent secure updater multi-dimension fix
+ secure=text(root/'app/src/independent/java/com/nova/downloader/update/SecureUpdateManager.kt')
+ check('self-update no BuildConfig.FLAVOR comparison', 'BuildConfig.FLAVOR' not in secure)
+-check('self-update chooses full/lite by HAS_FFMPEG', 'expectedEngineFlavor()' in secure and 'BuildConfig.HAS_FFMPEG' in secure)
++check('self-update chooses full/lite by edition', 'expectedEngineFlavor()' in secure and 'BuildConfig.IS_PRO_EDITION' in secure)
+ check('self-update has separate Lite/Full manifest URL', 'NOVA_UPDATE_MANIFEST_URL_FULL' in secure and 'NOVA_UPDATE_MANIFEST_URL_LITE' in secure)
+ 
+ # Download-start bug from 037 remains fixed
+--- a/tools/check_checkpoint_053.py
++++ b/tools/check_checkpoint_053.py
+@@ -12,7 +12,7 @@
+ indeng=(root/"app/src/independent/java/com/nova/downloader/engine/EngineRecoveryManager.kt").read_text(encoding="utf-8")
+ playplug=(root/"app/src/play/java/com/nova/downloader/data/YtDlpPluginVault.kt").read_text(encoding="utf-8")
+ indplug=(root/"app/src/independent/java/com/nova/downloader/data/YtDlpPluginVault.kt").read_text(encoding="utf-8")
+-ok('val novaVersionName = "0.53"' in g and 'val novaVersionCode = 55' in g and 'val novaCheckpoint = "053"' in g, '053 identity')
++ok('val novaVersionName = "0.53.1"' in g and 'val novaVersionCode = 56' in g and 'val novaCheckpoint = "053"' in g, '053 identity')
+ ok('Nova Video İndir' in g, 'new artifact brand')
+ ok('BuildConfig.FLAVOR' not in main and 'R.string.distribution_independent' in main, 'no raw Independent flavor in main UI')
+ ok('!BuildConfig.PLAY_STORE_BUILD && settings.remoteEjsEnabled' in req, 'remote EJS excluded from Play')

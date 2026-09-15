@@ -1,0 +1,174 @@
+name: Nova Video İndir 0.53.1 FFmpeg Lite Hotfix Test
+
+on:
+  push:
+    branches:
+      - nova053-build
+    paths:
+      - '.github/workflows/hotfix053h1.yml'
+      - '.github/patches/Nova053H1.patch'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nova-video-indir-053h1-test
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: 053H1 Lite FFmpeg derle ve doğrula
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SOURCE_ZIP: Nova Video İndir 053 Kaynak.zip
+      SOURCE_SHA256: 41601f2fcfa704aa088c2084b8017f149eaaa98bd1bdb09fcdc37e780f2f06fe
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      GRADLE_OPTS: -Dfile.encoding=UTF-8
+      NOVA_PLAY_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_PLAY.md
+      NOVA_INDEPENDENT_PRIVACY_URL: https://github.com/crypt4536-lgtm/Nova-ndir/blob/main/PRIVACY_INDEPENDENT.md
+
+    steps:
+      - name: Repoyu al
+        uses: actions/checkout@v5
+
+      - name: 053 kaynağını aç ve H1 yamasını uygula
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$SOURCE_SHA256" || { echo "::error::053 kaynak SHA256 uyuşmuyor: $ACTUAL"; exit 1; }
+          rm -rf "$RUNNER_TEMP/source"
+          mkdir -p "$RUNNER_TEMP/source"
+          unzip -q "$SOURCE_ZIP" -d "$RUNNER_TEMP/source"
+          GRADLEW="$(find "$RUNNER_TEMP/source" -type f -name gradlew -print -quit)"
+          test -n "$GRADLEW"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+          chmod +x "$GRADLEW"
+          (cd "$PROJECT_DIR" && patch --batch --forward -p1 < "$GITHUB_WORKSPACE/.github/patches/Nova053H1.patch")
+          python3 "$PROJECT_DIR/tools/check_checkpoint_053.py"
+          grep -q 'buildConfigField("boolean", "IS_PRO_EDITION", "false")' "$PROJECT_DIR/app/build.gradle.kts"
+          test "$(grep -c 'buildConfigField("boolean", "HAS_FFMPEG", "true")' "$PROJECT_DIR/app/build.gradle.kts")" -eq 2
+          grep -q 'implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'if (BuildConfig.HAS_FFMPEG) FfmpegRuntime.initialize' "$PROJECT_DIR/app/src/main/java/com/nova/downloader/service/YtDlpDownloadService.kt"
+          grep -q 'isResumableFailure' "$PROJECT_DIR/app/src/main/java/com/nova/downloader/service/YtDlpDownloadService.kt"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            curl -fsSL -o "$RUNNER_TEMP/commandlinetools.zip" https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+            rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest" "$RUNNER_TEMP/android-cmdline-tools"
+            unzip -q "$RUNNER_TEMP/commandlinetools.zip" -d "$RUNNER_TEMP/android-cmdline-tools"
+            mv "$RUNNER_TEMP/android-cmdline-tools/cmdline-tools"/* "$ANDROID_SDK_ROOT/cmdline-tools/latest/"
+          fi
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/build-tools/36.0.0" >> "$GITHUB_PATH"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Release imzasını hazırla
+        shell: bash
+        env:
+          NOVA_KEYSTORE_B64: ${{ secrets.NOVA_KEYSTORE_B64 }}
+          NOVA_KEY_ALIAS: ${{ secrets.NOVA_KEY_ALIAS }}
+          NOVA_STORE_PASSWORD: ${{ secrets.NOVA_STORE_PASSWORD }}
+          NOVA_KEY_PASSWORD: ${{ secrets.NOVA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${NOVA_KEYSTORE_B64:-}"
+          test -n "${NOVA_KEY_ALIAS:-}"
+          test -n "${NOVA_STORE_PASSWORD:-}"
+          test -n "${NOVA_KEY_PASSWORD:-}"
+          umask 077
+          KEYSTORE_PATH="$RUNNER_TEMP/nova-release.keystore"
+          printf '%s' "$NOVA_KEYSTORE_B64" | base64 --decode > "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$NOVA_STORE_PASSWORD" -alias "$NOVA_KEY_ALIAS" >/dev/null
+          {
+            echo "NOVA_KEYSTORE=$KEYSTORE_PATH"
+            echo "NOVA_KEY_ALIAS=$NOVA_KEY_ALIAS"
+            echo "NOVA_STORE_PASSWORD=$NOVA_STORE_PASSWORD"
+            echo "NOVA_KEY_PASSWORD=$NOVA_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: 0.53.1 dört dağıtımı derle
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d app/schemas ]; then find app/schemas -type f -name '*.json' -delete; fi
+          ./gradlew clean :app:buildNovaDistributionRelease --no-daemon --max-workers=1 --stacktrace --console=plain
+
+      - name: Lite ve Pro FFmpeg paketini doğrula
+        id: outputs
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          import os
+          root=Path(os.environ['PROJECT_DIR'])
+          files=[
+              root/'Nova Video İndir 0.53.1 Bağımsız'/'Nova Video İndir 0.53.1 Bağımsız Lite.apk',
+              root/'Nova Video İndir 0.53.1 Bağımsız'/'Nova Video İndir 0.53.1 Bağımsız Pro.apk',
+              root/'Nova Video İndir 0.53.1 Google Play'/'Nova Video İndir 0.53.1 Google Play Lite.aab',
+              root/'Nova Video İndir 0.53.1 Google Play'/'Nova Video İndir 0.53.1 Google Play Pro.aab',
+          ]
+          required={'libffmpeg.so','libffmpeg.zip.so','libffprobe.so'}
+          for f in files:
+              assert f.is_file() and f.stat().st_size > 0, f'Çıktı eksik: {f}'
+              with zipfile.ZipFile(f) as z:
+                  names=set(z.namelist())
+                  for abi in ('arm64-v8a','armeabi-v7a'):
+                      matches={Path(n).name for n in names if f'/{abi}/' in n}
+                      missing=required-matches
+                      assert not missing, f'{f.name} {abi} FFmpeg eksik: {sorted(missing)}'
+              print('FFMPEG PASS', f.name)
+          PY
+          OUT="$GITHUB_WORKSPACE/hotfix-artifacts"
+          mkdir -p "$OUT"
+          cp "$PROJECT_DIR/Nova Video İndir 0.53.1 Bağımsız/Nova Video İndir 0.53.1 Bağımsız Lite.apk" "$OUT/"
+          cp "$PROJECT_DIR/Nova Video İndir 0.53.1 Bağımsız/Nova Video İndir 0.53.1 Bağımsız Pro.apk" "$OUT/"
+          cp "$PROJECT_DIR/Nova Video İndir 0.53.1 Google Play/Nova Video İndir 0.53.1 Google Play Lite.aab" "$OUT/"
+          cp "$PROJECT_DIR/Nova Video İndir 0.53.1 Google Play/Nova Video İndir 0.53.1 Google Play Pro.aab" "$OUT/"
+          sha256sum "$OUT"/* | tee "$OUT/SHA256SUMS.txt"
+
+      - name: Bağımsız APK imzalarını doğrula
+        shell: bash
+        run: |
+          set -euo pipefail
+          for APK in hotfix-artifacts/*.apk; do apksigner verify --verbose --print-certs "$APK"; done
+
+      - name: Hotfix test artifactını yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova Video İndir 0.53.1 FFmpeg Lite Hotfix Test
+          path: hotfix-artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Geçici imza dosyasını temizle
+        if: always()
+        shell: bash
+        run: rm -f "${NOVA_KEYSTORE:-}" || true
